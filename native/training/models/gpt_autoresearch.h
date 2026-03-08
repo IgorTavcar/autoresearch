@@ -17,4 +17,4 @@
 #define VOCAB 32768       // autoresearch vocab size
 
 #define CKPT_PATH "ane_autoresearch_dyn_ckpt.bin"
-#define DEFAULT_DATA_PATH "data/tinystories_data00.bin"
+#define DEFAULT_DATA_PATH "data/train.bin"
