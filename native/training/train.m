@@ -191,6 +191,7 @@ int main(int argc, char *argv[]) {
         bool do_resume = false, from_scratch = false;
         const char *data_path = DEFAULT_DATA_PATH;
         const char *val_path = NULL;
+        const char *token_bytes_path = NULL;
         int val_interval = 500;
         int val_steps = 20;
         for (int i=1; i<argc; i++) {
@@ -205,8 +206,28 @@ int main(int argc, char *argv[]) {
             else if (strcmp(argv[i], "--val") == 0 && i+1<argc) val_path = argv[++i];
             else if (strcmp(argv[i], "--val-interval") == 0 && i+1<argc) val_interval = atoi(argv[++i]);
             else if (strcmp(argv[i], "--val-steps") == 0 && i+1<argc) val_steps = atoi(argv[++i]);
+            else if (strcmp(argv[i], "--token-bytes") == 0 && i+1<argc) token_bytes_path = argv[++i];
         }
         float lr = max_lr;
+
+        // Load token_bytes for val_bpb computation (optional)
+        int32_t *token_bytes = NULL;
+        if (token_bytes_path) {
+            FILE *tbf = fopen(token_bytes_path, "rb");
+            if (tbf) {
+                token_bytes = (int32_t*)malloc(VOCAB * sizeof(int32_t));
+                size_t read = fread(token_bytes, sizeof(int32_t), VOCAB, tbf);
+                fclose(tbf);
+                if ((int)read != VOCAB) {
+                    printf("WARNING: token_bytes has %zu entries, expected %d\n", read, VOCAB);
+                    free(token_bytes); token_bytes = NULL;
+                } else {
+                    printf("Loaded token_bytes: %d entries from %s\n", VOCAB, token_bytes_path);
+                }
+            } else {
+                printf("WARNING: Cannot open token_bytes: %s\n", token_bytes_path);
+            }
+        }
 
         // Allocate per-layer state
         LayerWeights lw[NLAYERS]; LayerAdam la[NLAYERS];
@@ -771,6 +792,8 @@ int main(int argc, char *argv[]) {
             // Validation
             if (val_data && step > 0 && step % val_interval == 0) {
                 float val_loss_sum = 0;
+                double bpb_total_nats = 0;
+                int64_t bpb_total_bytes = 0;
                 for (int vi = 0; vi < val_steps; vi++) {
                     size_t vpos = (size_t)vi * (val_n_tokens / val_steps);
                     if (vpos + SEQ + 1 > val_n_tokens) vpos = 0;
@@ -823,11 +846,25 @@ int main(int argc, char *argv[]) {
                     rmsnorm(x_final, x_cur, rms_final, DIM, SEQ);
                     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                                 CV, SEQ, DIM, 1.0f, cembed, DIM, x_final, SEQ, 0.0f, logits, SEQ);
-                    float vloss = cross_entropy_loss(dlogits, logits, vctargets, CV, SEQ);
-                    val_loss_sum += vloss;
+
+                    if (token_bytes) {
+                        float vloss = cross_entropy_bpb(logits, vctargets, vtarget_raw,
+                            token_bytes, CV, SEQ, &bpb_total_nats, &bpb_total_bytes);
+                        val_loss_sum += vloss;
+                    } else {
+                        float vloss = cross_entropy_loss(dlogits, logits, vctargets, CV, SEQ);
+                        val_loss_sum += vloss;
+                    }
                 }
                 float val_avg = val_loss_sum / val_steps;
-                printf("  [VAL step %d] val_loss=%.4f  val_bpt=%.4f\n", step, val_avg, val_avg / logf(2.0f));
+                if (token_bytes && bpb_total_bytes > 0) {
+                    float val_bpb = (float)(bpb_total_nats / (log(2.0) * bpb_total_bytes));
+                    printf("  [VAL step %d] val_loss=%.4f  val_bpb=%.4f  (%lld bytes)\n",
+                           step, val_avg, val_bpb, bpb_total_bytes);
+                } else {
+                    printf("  [VAL step %d] val_loss=%.4f  val_bpt=%.4f\n",
+                           step, val_avg, val_avg / logf(2.0f));
+                }
             }
 
             // Adam update every accum_steps

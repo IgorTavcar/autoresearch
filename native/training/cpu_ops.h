@@ -92,6 +92,39 @@ static float cross_entropy_loss(float *dlogits, const float *logits, const uint1
     return total_loss / S;
 }
 
+// Cross-entropy for val_bpb: returns per-token nats, accumulates total_nats and total_bytes.
+// Uses full (non-compact) target token IDs for token_bytes lookup.
+// token_bytes: int32[VOCAB], byte count per token. Tokens with 0 bytes (special tokens) are excluded.
+static float cross_entropy_bpb(const float *logits, const uint16_t *compact_targets,
+                                const uint16_t *full_targets, const int32_t *token_bytes,
+                                int V, int S, double *out_nats, int64_t *out_bytes) {
+    float *col = (float*)malloc(V * 4);
+    double nats = 0;
+    int64_t nbytes = 0;
+    for (int t = 0; t < S; t++) {
+        cblas_scopy(V, logits + t, S, col, 1);
+        float maxv; vDSP_maxv(col, 1, &maxv, (vDSP_Length)V);
+        float neg_max = -maxv;
+        vDSP_vsadd(col, 1, &neg_max, col, 1, (vDSP_Length)V);
+        int n = V; vvexpf(col, col, &n);
+        float sum; vDSP_sve(col, 1, &sum, (vDSP_Length)V);
+        float inv_sum = 1.0f / sum;
+        vDSP_vsmul(col, 1, &inv_sum, col, 1, (vDSP_Length)V);
+        int ctgt = compact_targets[t];
+        float token_nats = -logf(col[ctgt] + 1e-10f);
+        int ftgt = full_targets[t];
+        int tb = (ftgt < VOCAB) ? token_bytes[ftgt] : 0;
+        if (tb > 0) {
+            nats += token_nats;
+            nbytes += tb;
+        }
+    }
+    free(col);
+    *out_nats += nats;
+    *out_bytes += nbytes;
+    return (float)(nats / S);  // also return avg CE for logging
+}
+
 // Vocab compaction: build mapping from full 32K vocab to compact vocab
 typedef struct {
     int compact_vocab;          // number of active tokens
