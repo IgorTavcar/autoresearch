@@ -125,4 +125,4 @@ help:
 	@echo ""
 	@echo "Options:"
 	@echo "  MODEL=xxx       Select model config (default: gpt_autoresearch)"
-	@echo "                  Options: stories110m, qwen3_06b, gpt_autoresearch"
+	@echo "                  Options: stories110m, qwen3_06b, gpt_autoresearch, gpt_karpathy"
