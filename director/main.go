@@ -31,8 +31,9 @@ var experimentName string
 //go:embed configs/*.json
 var configFS embed.FS
 
-// httpClient forces IPv4 to avoid IPv6 TLS issues.
+// httpClient forces IPv4 and has a generous timeout for slow reasoning models.
 var httpClient = &http.Client{
+	Timeout: 10 * time.Minute,
 	Transport: &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "tcp4", addr)
@@ -103,46 +104,64 @@ type arxivLink struct {
 	Type string `xml:"type,attr"`
 }
 
-func fetchRandomArxiv(logger *log.Logger, cfg directorConfig) (string, string, error) {
-	cat := cfg.ArxivCategories[rand.IntN(len(cfg.ArxivCategories))]
-	term := cfg.ArxivSearchTerms[rand.IntN(len(cfg.ArxivSearchTerms))]
-	offset := rand.IntN(200)
-
-	query := fmt.Sprintf("cat:%s AND all:\"%s\"", cat, term)
-	reqURL := fmt.Sprintf("%s?search_query=%s&start=%d&max_results=1&sortBy=submittedDate&sortOrder=descending",
+func fetchArxivByQuery(logger *log.Logger, query string, offset int) (*arxivEntry, error) {
+	reqURL := fmt.Sprintf("%s?search_query=%s&start=%d&max_results=1&sortBy=relevance&sortOrder=descending",
 		arxivAPIURL, url.QueryEscape(query), offset)
-
-	logger.Printf("arxiv query: cat=%s term=%q offset=%d", cat, term, offset)
 
 	resp, err := doGet(reqURL)
 	if err != nil {
-		return "", "", fmt.Errorf("arxiv fetch: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var feed arxivFeed
 	if err := xml.NewDecoder(resp.Body).Decode(&feed); err != nil {
-		return "", "", fmt.Errorf("arxiv decode: %w", err)
+		return nil, err
 	}
-
 	if len(feed.Entries) == 0 {
-		logger.Printf("no results for %q in %s, falling back to category-only", term, cat)
-		fallbackURL := fmt.Sprintf("%s?search_query=%s&start=%d&max_results=1&sortBy=submittedDate&sortOrder=descending",
-			arxivAPIURL, url.QueryEscape("cat:"+cat), rand.IntN(500))
-		resp2, err := doGet(fallbackURL)
+		return nil, nil
+	}
+	return &feed.Entries[0], nil
+}
+
+func fetchRandomArxiv(logger *log.Logger, cfg directorConfig) (string, string, error) {
+	term := cfg.ArxivSearchTerms[rand.IntN(len(cfg.ArxivSearchTerms))]
+	cat := cfg.ArxivCategories[rand.IntN(len(cfg.ArxivCategories))]
+	offset := rand.IntN(50)
+
+	// Try 1: term + category (most relevant)
+	query := fmt.Sprintf("cat:%s AND all:\"%s\"", cat, term)
+	logger.Printf("arxiv query: %q offset=%d", query, offset)
+	entry, err := fetchArxivByQuery(logger, query, offset)
+	if err != nil {
+		logger.Printf("arxiv attempt 1 failed: %v", err)
+	}
+
+	// Try 2: term only, no category filter (broader)
+	if entry == nil {
+		query = fmt.Sprintf("all:\"%s\"", term)
+		offset = rand.IntN(100)
+		logger.Printf("arxiv fallback to term-only: %q offset=%d", query, offset)
+		entry, err = fetchArxivByQuery(logger, query, offset)
 		if err != nil {
-			return "", "", fmt.Errorf("arxiv fallback fetch: %w", err)
-		}
-		defer resp2.Body.Close()
-		if err := xml.NewDecoder(resp2.Body).Decode(&feed); err != nil {
-			return "", "", fmt.Errorf("arxiv fallback decode: %w", err)
-		}
-		if len(feed.Entries) == 0 {
-			return "", "", fmt.Errorf("no arxiv entries found")
+			logger.Printf("arxiv attempt 2 failed: %v", err)
 		}
 	}
 
-	entry := feed.Entries[0]
+	// Try 3: different term, no category (last resort)
+	if entry == nil {
+		term = cfg.ArxivSearchTerms[rand.IntN(len(cfg.ArxivSearchTerms))]
+		query = fmt.Sprintf("all:\"%s\"", term)
+		logger.Printf("arxiv last resort: %q", query)
+		entry, err = fetchArxivByQuery(logger, query, 0)
+		if err != nil {
+			return "", "", fmt.Errorf("all arxiv attempts failed: %w", err)
+		}
+		if entry == nil {
+			return "", "", fmt.Errorf("no arxiv entries found after 3 attempts")
+		}
+	}
+
 	title := strings.Join(strings.Fields(entry.Title), " ")
 	abstract := strings.Join(strings.Fields(entry.Summary), " ")
 	logger.Printf("got paper: %q", title)
@@ -292,9 +311,13 @@ type deepseekResponse struct {
 	} `json:"choices"`
 }
 
-func callDeepSeek(cfg directorConfig, apiKey, systemPrompt, userPrompt string) (string, error) {
+// callDeepSeek calls the DeepSeek API. Pass "" for model to use cfg default.
+func callDeepSeek(cfg directorConfig, apiKey, model, systemPrompt, userPrompt string) (string, error) {
+	if model == "" {
+		model = cfg.DeepSeekModel
+	}
 	reqBody := deepseekRequest{
-		Model:       cfg.DeepSeekModel,
+		Model:       model,
 		Stream:      false,
 		Temperature: &cfg.Temperature,
 		Messages: []deepseekMessage{
@@ -511,18 +534,36 @@ func main() {
 		paperAbstract = "No external paper available this round. Generate a directive purely from your knowledge of efficient transformer training techniques."
 	}
 
-	// 3. Build the user prompt (template substitution)
+	// 3. Summarize train.py
+	trainCode, err := os.ReadFile("train.py")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: could not read train.py: %v\n", err)
+		os.Exit(1)
+	}
+
+	logger.Println("summarizing train.py...")
+	summary, err := callDeepSeek(cfg, apiKey, "deepseek-chat",
+		"Summarize this neural network training code in exactly two paragraphs. First paragraph: model architecture (layer types, dimensions, attention mechanism, normalization, activations, positional encoding, parameter count, etc). Second paragraph: optimizer setup, learning rates, batch sizes, scheduling, training loop mechanics, and other stuff. Use exact numbers and names from the code. No opinions, just facts.",
+		string(trainCode),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: summarization call failed: %v\n", err)
+		os.Exit(1)
+	}
+	logger.Println("summarization complete")
+
+	// 4. Build the user prompt (template substitution)
 	userPrompt := cfg.UserPrompt
 	userPrompt = strings.ReplaceAll(userPrompt, "{{history}}", history)
 	userPrompt = strings.ReplaceAll(userPrompt, "{{paper_title}}", paperTitle)
 	userPrompt = strings.ReplaceAll(userPrompt, "{{paper_abstract}}", paperAbstract)
+	userPrompt = strings.ReplaceAll(userPrompt, "{{code_summary}}", summary)
 
-	// 4. Call DeepSeek
-	logger.Println("calling DeepSeek to generate directive...")
-	result, err := callDeepSeek(cfg, apiKey, cfg.SystemPrompt, userPrompt)
+	// 5. Call DeepSeek for directive
+	logger.Println("generating directive...")
+	result, err := callDeepSeek(cfg, apiKey, "", cfg.SystemPrompt, userPrompt)
 	if err != nil {
-		logger.Printf("error: %v", err)
-		fmt.Println("Internal error. Try running me again.")
+		fmt.Fprintf(os.Stderr, "error: directive call failed: %v\n", err)
 		os.Exit(1)
 	}
 

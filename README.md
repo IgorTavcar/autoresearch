@@ -14,7 +14,13 @@ This repo is my attempt to build that monkey. This is a search for a search.
 
 ## Architecture
 
-Each experiment method lives in its own directory with `train.py`, `prepare.py`, and `program.md`. The `baseline/` directory is the Karpathy's autoresearch loop. Other directories (e.g. `mad-scientist/`) add a **director** — a Go binary that calls DeepSeek to generate creative research directives before each experiment iteration, breaking the agent's tendency toward safe incremental changes. 
+Each experiment method lives in its own directory with `train.py`, `prepare.py`, and `program.md`. The `baseline/` directory is Karpathy's vanilla autoresearch loop. Other directories (e.g. `mad-scientist/`) add a **director** — a Go binary that generates creative research directives before each experiment iteration. The director works in three steps:
+
+1. **Summarize** the current `train.py` via DeepSeek Chat (so it always knows the actual code state)
+2. **Fetch** a random ML paper abstract from arxiv (external novelty injection)
+3. **Generate** a directive via DeepSeek Reasoner, combining code summary + experiment history + paper into one specific idea
+
+The output is a tentative suggestion ("I think you could try...") so the upstream agent reasons about it rather than blindly executing.
 
 > I chose Go because I wanted the running agent to have absolutely zero context about the director and to see it as a black box. Just a binary that spits out ideas.
 
@@ -45,7 +51,7 @@ Makefile
 | Name | Director | Description |
 |------|----------|-------------|
 | `baseline` | None | Vanilla autoresearch. The agent decides what to try next on its own. Control group. |
-| `mad-scientist` | DeepSeek Reasoner (temp 1.3) | Before each iteration, the director reads experiment history from `results.tsv` (what worked, what failed, stall detection) and fetches a RANDOM MACHINE LEARNING paper from arxiv, then generates a bold, specific directive the agent must follow. Combining historical awareness with external novelty. |
+| `mad-scientist` | DeepSeek Reasoner (temp 1.2) | Summarizes current code, reads experiment history, fetches a random ML paper from arxiv, then generates a bold directive framed as a suggestion. Combines code awareness + historical context + external novelty. |
 
 ### Commands
 
