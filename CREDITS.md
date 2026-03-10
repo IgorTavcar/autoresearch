@@ -143,6 +143,16 @@ Everything we built on, and exactly what came from where.
 
 ---
 
+## Hyperspace AI (agents.hyper.space)
+
+**Who:** @HyperspaceAI
+**Source:** https://agents.hyper.space/research-report
+
+**What we took from them:**
+- Multi-agent gossip concept: the idea that autonomous AI agents can share findings via a shared knowledge substrate, enabling cross-pollination between independent research threads. Our gossip system (shared JSONL file, read-before-experiment / log-after-experiment protocol) is directly inspired by their work on gossip-enhanced communication for agentic AI.
+
+---
+
 ## What's Truly Ours (not from any of the above)
 
 - Zero-init output projections (Wo, W2) for activation stability
@@ -150,7 +160,7 @@ Everything we built on, and exactly what came from where.
 - Split learning rates: matrix_lr_scale=0.05, embed_lr_scale=5.0
 - 55-experiment systematic sweep across 5 phases on ANE
 - Karpathy data bridge (rustbpe vocab=8192 → ANE native binary format)
-- Multi-agent gossip system (262 experiments, cross-pollination protocol)
+- Multi-agent gossip implementation (262 experiments, cross-pollination protocol) — concept from @HyperspaceAI
 - 3-framework comparison methodology (ANE vs MLX vs MPS, same data)
 - SEQ=1024 testing, SRAM cliff analysis, quality vs throughput profiling
 - Activation explosion diagnosis (3 failures → 3 fixes)
