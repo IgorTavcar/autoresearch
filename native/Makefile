@@ -25,6 +25,26 @@ build/libane_bridge.dylib: bridge/ane_bridge.m bridge/ane_bridge.h
 .PHONY: probes
 probes: build/sram_bench build/sram_probe build/api_exploration build/inmem_basic build/inmem_bench build/inmem_peak
 
+# === Optimization probes (from testing_roadmap.md) ===
+.PHONY: opt-probes
+opt-probes: build/direct_eval_probe build/perf_stats_probe build/ane_classifier_probe build/latelatch_probe
+
+build/direct_eval_probe: probes/direct_eval_probe.m
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+build/perf_stats_probe: probes/perf_stats_probe.m
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+build/ane_classifier_probe: probes/ane_classifier_probe.m
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+build/latelatch_probe: probes/latelatch_probe.m
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
 build/sram_bench: probes/sram_bench.m
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
@@ -76,7 +96,7 @@ build/train_dynamic: training/train.m mil/mil_dynamic.h training/cpu_ops.h runti
 
 # === All targets ===
 .PHONY: all
-all: bridge probes weight-tests train
+all: bridge probes opt-probes weight-tests train
 
 # === Clean ===
 .PHONY: clean
@@ -107,6 +127,21 @@ bench-weights: build/test_weight_reload build/test_dynamic_matmul
 	@echo "=== Dynamic Matmul Benchmark ==="
 	./build/test_dynamic_matmul
 
+# === Run optimization probes (Tier 1 from testing roadmap) ===
+.PHONY: bench-opt
+bench-opt: opt-probes
+	@echo "=== Stage 5: perfStatsMask + Hardware Info ==="
+	./build/perf_stats_probe
+	@echo ""
+	@echo "=== Stage 1: Direct Eval (XPC bypass) ==="
+	./build/direct_eval_probe
+	@echo ""
+	@echo "=== Stage 2: ANE Classifier (1x1 conv) ==="
+	./build/ane_classifier_probe
+	@echo ""
+	@echo "=== Stage 4: SkipPrepare + LateLatch ==="
+	./build/latelatch_probe
+
 .PHONY: help
 help:
 	@echo "ANE Native Build System"
@@ -122,6 +157,7 @@ help:
 	@echo "  test-ane        Quick test: verify ANE hardware access"
 	@echo "  bench-sram      Probe ANE SRAM size and performance cliffs"
 	@echo "  bench-weights   Test weight update strategies"
+	@echo "  bench-opt       Run Tier 1 optimization probes (from testing roadmap)"
 	@echo ""
 	@echo "Options:"
 	@echo "  MODEL=xxx       Select model config (default: gpt_autoresearch)"
