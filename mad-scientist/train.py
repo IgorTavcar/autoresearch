@@ -34,7 +34,7 @@ class GPTConfig:
 
 
 def norm(x):
-    return F.layer_norm(x, (x.size(-1),))
+    return F.rms_norm(x, (x.size(-1),))
 
 
 def has_ve(layer_idx, n_layer):
@@ -557,6 +557,7 @@ while True:
         if group['kind'] == 'muon':
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     model.zero_grad(set_to_none=True)
 
