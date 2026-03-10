@@ -53,6 +53,10 @@ Makefile
 | `baseline` | None | Vanilla autoresearch. The agent decides what to try next on its own. Control group. |
 | `mad-scientist` | DeepSeek Reasoner (temp 1.2) | Summarizes current code, reads experiment history, fetches a random ML paper from arxiv, then generates a bold directive framed as a suggestion. Combines code awareness + historical context + external novelty. |
 
+#### Mad-Scientist vs Original Baseline (Karpathy's H100)
+
+![Relative improvement trajectory](h2h_relative_improvement.png)
+
 ### Commands
 
 ```bash

@@ -1,5 +1,6 @@
 # Python-generated files
 __pycache__/
+.ipynb_checkpoints/
 *.py[oc]
 build/
 dist/
@@ -21,6 +22,8 @@ dev/
 
 # Results files (per-run TSVs live under results/)
 *.png
+!progress.png
+!h2h_relative_improvement.png
 
 # Experiment checkpoints & logs
 *.best
