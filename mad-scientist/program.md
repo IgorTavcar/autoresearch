@@ -33,8 +33,6 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
 
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
-
 ## Output format
 
 Once the script finishes it prints a summary like this:
@@ -90,7 +88,18 @@ iter	val_bpb	best_val_bpb	memory_gb	status	description	timestamp
 
 ## The experiment loop
 
-LOOP FOREVER:
+### First run (baseline)
+
+Before experimenting, establish the baseline:
+
+1. Run `python3 train.py > run.log 2>&1` without any modifications.
+2. Read the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
+3. Record iter=1 in results.tsv with status `keep` and description `baseline`.
+4. Create the checkpoint: `cp train.py train.py.best`
+
+### Experiment loop
+
+After the baseline, LOOP FOREVER:
 
 1. **Ask your supervisor for direction**: Run `./director` (this may take up to a few minutes, be patient) — it's a program that acts as your supervisor professor. It will give you a suggestion for what to try next. Read its output carefully, then decide: do you agree with the direction? Does it make sense given the current state of the code? You can follow it closely, adapt the core idea, combine it with your own intuition, or ignore it entirely if it's bad advice. It's your call — you're the one writing the code and your judgment matters. The supervisor gives direction; you decide how (or whether) to apply it.
 2. Modify `train.py` with your chosen experimental idea.
@@ -103,12 +112,12 @@ LOOP FOREVER:
 
 The idea is that you are a researcher working under a supervisor. The supervisor (`./director`) proposes research directions, but you are the hands-on expert. You understand the code, you see the results, and you make the final call on every change. If the supervisor's idea is brilliant, run with it. If it's half-baked, extract what's useful and adapt it. If it's nonsense, ignore it and try something better. The supervisor will have a fresh idea for you every iteration.
 
-**Checkpoint**: `train.py.best` is your checkpoint file. It always contains the last version of `train.py` that improved val_bpb. After the baseline run (first run), immediately `cp train.py train.py.best` to establish the initial checkpoint. On a successful experiment, overwrite it. On a failure, restore from it.
-
 **Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
 
 **Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, restore from `train.py.best`, and move on.
 
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. Run `./director` every iteration for fresh ideas — it will always have a new suggestion for you. The loop runs until the human interrupts you, period.
+
+**NEVER CHANGE YOUR WORKING DIRECTORY**: Stay in the current directory.
 
 As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
