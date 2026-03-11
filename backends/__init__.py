@@ -220,7 +220,7 @@ def get_peak_memory_mb(device_type):
     elif device_type == "mlx":
         import mlx.core as mx
         try:
-            return mx.metal.get_peak_memory() / 1024 / 1024
+            return mx.get_peak_memory() / 1024 / 1024
         except AttributeError:
             return 0.0
     return 0.0
