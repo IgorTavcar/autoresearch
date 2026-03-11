@@ -22,8 +22,13 @@ import (
 
 const (
 	arxivAPIURL    = "https://export.arxiv.org/api/query"
+	ar5ivBaseURL   = "https://ar5iv.labs.arxiv.org/html/"
 	deepseekAPIURL = "https://api.deepseek.com/chat/completions"
 )
+
+// enableFullPaperSummary controls whether the director fetches the full paper
+// text from ar5iv and summarizes it with DeepSeek, instead of using the abstract.
+var enableFullPaperSummary = true
 
 // experimentName is set at build time via -ldflags.
 var experimentName string
@@ -124,7 +129,7 @@ func fetchArxivByQuery(logger *log.Logger, query string, offset int) (*arxivEntr
 	return &feed.Entries[0], nil
 }
 
-func fetchRandomArxiv(logger *log.Logger, cfg directorConfig) (string, string, error) {
+func fetchRandomArxiv(logger *log.Logger, cfg directorConfig) (string, string, *arxivEntry, error) {
 	term := cfg.ArxivSearchTerms[rand.IntN(len(cfg.ArxivSearchTerms))]
 	cat := cfg.ArxivCategories[rand.IntN(len(cfg.ArxivCategories))]
 	offset := rand.IntN(50)
@@ -155,17 +160,130 @@ func fetchRandomArxiv(logger *log.Logger, cfg directorConfig) (string, string, e
 		logger.Printf("arxiv last resort: %q", query)
 		entry, err = fetchArxivByQuery(logger, query, 0)
 		if err != nil {
-			return "", "", fmt.Errorf("all arxiv attempts failed: %w", err)
+			return "", "", nil, fmt.Errorf("all arxiv attempts failed: %w", err)
 		}
 		if entry == nil {
-			return "", "", fmt.Errorf("no arxiv entries found after 3 attempts")
+			return "", "", nil, fmt.Errorf("no arxiv entries found after 3 attempts")
 		}
 	}
 
 	title := strings.Join(strings.Fields(entry.Title), " ")
 	abstract := strings.Join(strings.Fields(entry.Summary), " ")
 	logger.Printf("got paper: %q", title)
-	return title, abstract, nil
+	return title, abstract, entry, nil
+}
+
+// ---------------------------------------------------------------------------
+// ar5iv full paper fetch & summarization
+// ---------------------------------------------------------------------------
+
+// extractArxivID extracts the paper ID from an arxiv entry's links.
+// e.g. "https://arxiv.org/abs/2302.13971v1" → "2302.13971"
+func extractArxivID(entry *arxivEntry) string {
+	for _, link := range entry.Links {
+		href := link.Href
+		if strings.Contains(href, "arxiv.org/abs/") {
+			parts := strings.Split(href, "/abs/")
+			if len(parts) == 2 {
+				id := parts[1]
+				// strip version suffix (e.g. "v1", "v2")
+				if idx := strings.Index(id, "v"); idx > 0 {
+					id = id[:idx]
+				}
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+// fetchFullPaperText fetches the HTML version of a paper from ar5iv and
+// extracts the plain text content from the <article> element.
+func fetchFullPaperText(logger *log.Logger, paperID string) (string, error) {
+	reqURL := ar5ivBaseURL + paperID
+	logger.Printf("fetching full paper from %s", reqURL)
+
+	resp, err := doGet(reqURL)
+	if err != nil {
+		return "", fmt.Errorf("fetching ar5iv: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading ar5iv response: %w", err)
+	}
+
+	html := string(body)
+
+	// Extract content within <article...>...</article>
+	articleStart := strings.Index(html, "<article")
+	articleEnd := strings.Index(html, "</article>")
+	if articleStart >= 0 && articleEnd > articleStart {
+		html = html[articleStart : articleEnd+len("</article>")]
+	}
+
+	// Strip HTML tags
+	var text strings.Builder
+	inTag := false
+	for _, r := range html {
+		if r == '<' {
+			inTag = true
+			continue
+		}
+		if r == '>' {
+			inTag = false
+			text.WriteRune(' ')
+			continue
+		}
+		if !inTag {
+			text.WriteRune(r)
+		}
+	}
+
+	// Collapse whitespace and trim
+	lines := strings.Split(text.String(), "\n")
+	var cleaned []string
+	for _, line := range lines {
+		line = strings.Join(strings.Fields(line), " ")
+		if line != "" {
+			cleaned = append(cleaned, line)
+		}
+	}
+	result := strings.Join(cleaned, "\n")
+
+	// Truncate to ~200K chars (~100K tokens) to keep costs reasonable
+	const maxChars = 200000
+	if len(result) > maxChars {
+		result = result[:maxChars] + "\n\n[truncated]"
+		logger.Printf("paper text truncated to %d chars", maxChars)
+	}
+
+	logger.Printf("extracted %d chars of paper text", len(result))
+	return result, nil
+}
+
+// summarizePaper calls DeepSeek to summarize the full paper text into
+// 2-3 paragraphs focused on the main idea and novelty.
+func summarizePaper(logger *log.Logger, cfg directorConfig, apiKey, paperText string) (string, error) {
+	logger.Println("summarizing full paper with deepseek-reasoner...")
+
+	systemPrompt := `You are an expert ML researcher extracting actionable techniques from papers.
+Summarize this paper in 2-3 short paragraphs with this structure:
+1. TECHNIQUE: What specific method/trick/modification did they introduce? Describe the concrete mechanism (e.g. "they replaced X with Y", "they added Z to the loss function", "they scaled W by factor K"). Include formulas, hyperparameter values, or algorithmic steps if present.
+2. IMPLEMENTATION: How is it implemented? What layers/modules/functions are affected? What changes to a standard transformer/training loop would be needed to replicate this?
+3. RESULTS: What quantitative improvements did they achieve? On what scale (model size, dataset, compute)?
+
+Be concrete and specific. Avoid narrative framing ("this paper addresses...", "the key novelty is..."). Go straight to what they did and how.`
+	userPrompt := paperText
+
+	summary, err := callDeepSeek(cfg, apiKey, "deepseek-reasoner", systemPrompt, userPrompt)
+	if err != nil {
+		return "", fmt.Errorf("paper summarization failed: %w", err)
+	}
+
+	logger.Printf("paper summary generated (%d chars)", len(summary))
+	return summary, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -525,11 +643,33 @@ func main() {
 	history := formatHistory(experiments)
 
 	// 2. Fetch a random paper
-	paperTitle, paperAbstract, err := fetchRandomArxiv(logger, cfg)
+	paperTitle, paperAbstract, arxivEntry, err := fetchRandomArxiv(logger, cfg)
 	if err != nil {
 		logger.Printf("WARNING: arxiv fetch failed: %v, proceeding without paper", err)
 		paperTitle = "(no paper fetched)"
 		paperAbstract = "No external paper available this round. Generate a directive purely from your knowledge of efficient transformer training techniques."
+	}
+
+	// 2b. Optionally fetch & summarize the full paper
+	paperSummary := ""
+	if enableFullPaperSummary && arxivEntry != nil {
+		paperID := extractArxivID(arxivEntry)
+		if paperID != "" {
+			fullText, fetchErr := fetchFullPaperText(logger, paperID)
+			if fetchErr != nil {
+				logger.Printf("WARNING: full paper fetch failed: %v, no paper summary", fetchErr)
+			} else {
+				pSum, sumErr := summarizePaper(logger, cfg, apiKey, fullText)
+				if sumErr != nil {
+					logger.Printf("WARNING: paper summarization failed: %v, no paper summary", sumErr)
+				} else {
+					paperSummary = pSum
+					logger.Printf("paper summary generated")
+				}
+			}
+		} else {
+			logger.Printf("WARNING: could not extract arxiv ID, no paper summary")
+		}
 	}
 
 	// 3. Summarize train.py
@@ -555,6 +695,12 @@ func main() {
 	userPrompt = strings.ReplaceAll(userPrompt, "{{history}}", history)
 	userPrompt = strings.ReplaceAll(userPrompt, "{{paper_title}}", paperTitle)
 	userPrompt = strings.ReplaceAll(userPrompt, "{{paper_abstract}}", paperAbstract)
+	if paperSummary != "" {
+		userPrompt = strings.ReplaceAll(userPrompt, "{{paper_summary}}", paperSummary)
+	} else {
+		// Remove the summary section header and placeholder when no summary is available
+		userPrompt = strings.ReplaceAll(userPrompt, "\n\n### Detailed Summary\n\n{{paper_summary}}", "")
+	}
 	userPrompt = strings.ReplaceAll(userPrompt, "{{code_summary}}", summary)
 
 	// 5. Call DeepSeek for directive
