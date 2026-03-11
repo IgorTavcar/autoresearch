@@ -32,12 +32,15 @@ def newton_schulz_orthogonalize(X, ns_steps=5):
     Polar express: approximate the orthogonal polar factor of X
     using Newton-Schulz iterations with precomputed optimal coefficients.
 
-    X: shape (..., M, N) in bfloat16
-    Returns: orthogonalized X of same shape
+    X: shape (..., M, N)
+    Returns: orthogonalized X in bfloat16
+
+    Note: Uses float32 throughout. The original CUDA version uses bf16 because
+    tensor cores give 2x speedup. On Apple Silicon, float32 is nearly as fast
+    and avoids norm precision loss that causes divergence with bf16 reductions.
     """
-    X = X.astype(mx.bfloat16)
-    # Normalize
-    # Compute Frobenius norm over last two dims
+    X = X.astype(mx.float32)
+    # Normalize by Frobenius norm (must be float32 for accuracy on large matrices)
     norms = mx.sqrt((X * X).sum(axis=(-2, -1), keepdims=True))
     X = X / (norms * 1.02 + 1e-6)
 
@@ -57,7 +60,7 @@ def newton_schulz_orthogonalize(X, ns_steps=5):
             B = b * A + c * (A @ A)
             X = a * X + B @ X
 
-    return X
+    return X.astype(mx.bfloat16)
 
 
 # ---------------------------------------------------------------------------
@@ -251,8 +254,9 @@ class MuonAdamWMLX:
             stacked_p = mx.stack(params_list)
 
             # Scale LR by aspect ratio (same as original)
+            # Use current lr (which includes schedule) not initial_lr
             shape = params_list[0].shape
-            group['lr'] = group['initial_lr'] * max(1.0, shape[-2] / shape[-1]) ** 0.5
+            group['lr'] = group['lr'] * max(1.0, shape[-2] / shape[-1]) ** 0.5
 
             updated = self._step_muon(stacked_g, stacked_p, group)
 
