@@ -1,4 +1,4 @@
-# autoresearch-arm
+# autoresearch-MLX/MPS
 
 Apple Silicon dual-backend port of [karpathy/autoresearch](https://github.com/karpathy/autoresearch) with full Muon optimizer support on both PyTorch MPS and MLX.
 
