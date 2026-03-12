@@ -161,6 +161,12 @@ The Muon optimizer combines Newton-Schulz orthogonalization (Polar Express) with
 - [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) -- reference MLX port
 - [Jordan Keller](https://kellerjordan.github.io/posts/muon/) -- Muon optimizer
 
+## Upstream contributions
+
+- [PR #205](https://github.com/karpathy/autoresearch/pull/205) — Self-contained Apple Silicon MLX backend submitted to [karpathy/autoresearch](https://github.com/karpathy/autoresearch). GPU-accelerated Newton-Schulz with float32 NaN fix, MLX-native dataloader and evaluation. Zero modifications to existing files.
+- [PR #84](https://github.com/karpathy/autoresearch/pull/84) — Fix NaN loss not caught by fast-fail check *(merged)*
+- [PR #162](https://github.com/karpathy/autoresearch/pull/162) — Guard against infinite loop when no training shards exist *(merged)*
+
 ## License
 
 MIT
