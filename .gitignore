@@ -1,5 +1,6 @@
 # Python-generated files
 __pycache__/
+.ipynb_checkpoints/
 *.py[oc]
 build/
 dist/
@@ -19,5 +20,18 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
-# Results file
+# Results files (per-run TSVs live under results/)
 results.tsv
+*.png
+!progress.png
+!h2h_relative_improvement.png
+
+# Experiment checkpoints & logs
+*.best
+run.log
+
+# Director binaries, logs & secrets
+director/logs/
+*/director
+.env
+.director_prefetch.json
