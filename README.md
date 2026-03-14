@@ -122,6 +122,16 @@ Lives in `qwen-mps/`. A fundamentally different approach: continue-pretraining *
 - 19 methodical experiments: val_bpb 0.7818 → 0.7778
 - Key findings: freezing embeddings saves 1GB, LR 4-6e-6 beats higher, cooldown ratio 0.7 optimal
 
+### 5. Free-Tier Colab/Kaggle T4 (from [parthwhy](https://github.com/parthwhy/autoresearch-lite))
+
+Lives in `colab-t4/`. Makes autoresearch accessible to anyone with a Google account — zero cost, zero local setup.
+
+- Runs on **Google Colab T4** (free tier) and **Kaggle T4** (30 hrs/week free)
+- FA3 → PyTorch SDPA, dataset swapped to **TinyStories** (public, lower entropy)
+- Scaled hyperparams: SEQ=256, VOCAB=2048, DEPTH=4, batch 16K tokens
+- Self-contained **Colab/Kaggle notebook** (`colab_kaggle.ipynb`) with automated Python agent loop using OpenRouter API (free tier), auto-commit, resume-safe
+- 22 autonomous experiments, baseline val_bpb=0.686 at only 901MB VRAM / 5.2M params
+
 ---
 
 ## Project Structure
@@ -160,6 +170,9 @@ mlx/                        MLX training port
 
 # Qwen continue-pretrain (CrystinVW)
 qwen-mps/                   Qwen3.5-0.8B continue-pretraining on MPS
+
+# Free-tier Colab/Kaggle T4 (parthwhy)
+colab-t4/                   Zero-cost port for Google Colab / Kaggle T4
 
 # Visualization & analysis
 viz/                        Result visualization scripts
@@ -212,6 +225,7 @@ uv run train_mlx.py                          # Run MLX directly
 - [trevin-creator](https://github.com/trevin-creator) — Original MLX port
 - [miolini](https://github.com/miolini) — MPS/macOS port
 - [maderix](https://github.com/maderix) — ANE private API reverse engineering
+- [parthwhy](https://github.com/parthwhy/autoresearch-lite) — Free-tier Colab/Kaggle T4 port with automated agent notebook
 - [Apple MLX team](https://github.com/ml-explore/mlx)
 
 ## Notable forks (not merged)
