@@ -10,8 +10,17 @@ wheels/
 # Virtual environments
 .venv
 worktrees/
-results/
+.worktrees
 queue/
+
+# Results — track summaries and key visuals, not raw logs
+results/*.tsv
+results/logs_*/
+results/sweep_5min/
+results/mps_pretest/*.log
+
+# Viz — all viz content (scripts + generated PNGs)
+viz/
 
 # Agent prompt files (generated per-session by launchers)
 CLAUDE.md
@@ -35,3 +44,14 @@ director/logs/
 */director
 .env
 .director_prefetch.json
+
+# Native build output (rebuild on target machine)
+native/build/
+
+# CoreML model artifacts
+*.mlpackage
+*.mlmodelc
+
+# Checkpoint files
+*.pt
+*.bin
