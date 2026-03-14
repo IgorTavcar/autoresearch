@@ -190,7 +190,7 @@ class GPT(nn.Module):
                 self.value_embeds[str(i)] = nn.Embedding(config.vocab_size, kv_dim)
 
         # Rotary embeddings (not a parameter)
-        self.rotary = RotaryEmbedding(head_dim, config.sequence_len * 10)
+        self.rotary = RotaryEmbedding(head_dim, config.sequence_len)
 
         # Precompute attention masks
         self._masks = {}
@@ -342,6 +342,7 @@ DEVICE_BATCH_SIZE = _hp_defaults['device_batch_size']
 # ---------------------------------------------------------------------------
 
 t_start = time.time()
+# FIXED SEED — do not change. Changing seeds games val_bpb via eval noise (issue #131)
 mx.random.seed(42)
 
 PEAK_FLOPS = get_peak_flops(_hw_info)
@@ -540,3 +541,17 @@ print(f"depth:            {DEPTH}")
 print(f"backend:          mlx")
 print(f"chip:             {_hw_info['chip_name']}")
 print(f"startup_seconds:  {t_start_training - t_start:.1f}")
+
+# Write structured results to JSON (issue #64: mitigates prompt injection via stdout)
+import json as _json
+with open("results.json", "w") as _f:
+    _json.dump({
+        "val_bpb": round(val_bpb, 6),
+        "training_seconds": round(total_training_time, 1),
+        "peak_vram_mb": round(peak_vram_mb, 1),
+        "mfu_percent": round(steady_state_mfu, 2),
+        "num_steps": step,
+        "num_params_M": round(num_params / 1e6, 1),
+        "depth": DEPTH,
+        "backend": "mlx",
+    }, _f)

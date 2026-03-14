@@ -143,7 +143,7 @@ class GPT(nn.Module):
             for i in range(config.n_layer) if has_ve(i, config.n_layer)
         })
         # Rotary embeddings
-        self.rotary_seq_len = config.sequence_len * 10
+        self.rotary_seq_len = config.sequence_len
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
@@ -455,6 +455,7 @@ DEVICE_BATCH_SIZE = int(os.environ.get("DEVICE_BATCH_SIZE", 32))  # per-device b
 # ---------------------------------------------------------------------------
 
 t_start = time.time()
+# FIXED SEED — do not change. Changing seeds games val_bpb via eval noise (issue #131)
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 torch.set_float32_matmul_precision("high")
@@ -632,3 +633,16 @@ print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
 print(f"startup_seconds:  {startup_time:.1f}")
+
+# Write structured results to JSON (issue #64: mitigates prompt injection via stdout)
+import json as _json
+with open("results.json", "w") as _f:
+    _json.dump({
+        "val_bpb": round(val_bpb, 6),
+        "training_seconds": round(total_training_time, 1),
+        "peak_vram_mb": round(peak_vram_mb, 1),
+        "mfu_percent": round(steady_state_mfu, 2),
+        "num_steps": step,
+        "num_params_M": round(num_params / 1e6, 1),
+        "depth": DEPTH,
+    }, _f)
