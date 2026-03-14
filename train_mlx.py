@@ -378,8 +378,10 @@ num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
-assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
+assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0, \
+    f"DEVICE_BATCH_SIZE={DEVICE_BATCH_SIZE} does not evenly divide TOTAL_BATCH_SIZE={TOTAL_BATCH_SIZE} (tokens_per_fwdbwd={tokens_per_fwdbwd})"
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
+assert grad_accum_steps > 0, "TOTAL_BATCH_SIZE must be >= DEVICE_BATCH_SIZE * MAX_SEQ_LEN"
 
 # Build optimizer with Muon
 model_dim = config.n_embd
@@ -514,6 +516,9 @@ print()
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
+# Save model weights before eval so training isn't lost if eval crashes
+mx.save_safetensors("checkpoint.safetensors", dict(model.parameters()))
+
 # Final eval
 val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE, backend="mlx")
 
@@ -534,3 +539,4 @@ print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
 print(f"backend:          mlx")
 print(f"chip:             {_hw_info['chip_name']}")
+print(f"startup_seconds:  {t_start_training - t_start:.1f}")

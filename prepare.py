@@ -16,7 +16,9 @@ import sys
 import time
 import math
 import argparse
-import pickle
+import json
+import base64
+import hashlib
 from multiprocessing import Pool
 
 import numpy as np
@@ -64,6 +66,9 @@ MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
 VAL_SHARD = MAX_SHARD  # pinned validation shard (shard_06542)
 VAL_FILENAME = f"shard_{VAL_SHARD:05d}.parquet"
 VOCAB_SIZE = 8192
+TOKENIZER_CONFIG_FILENAME = "tokenizer.json"
+TOKEN_BYTES_FILENAME = "token_bytes.npy"
+LEGACY_TOKENIZER_PICKLE = "tokenizer.pkl"
 
 # BPE split pattern (GPT-4 style, with \p{N}{1,2} instead of {1,3})
 SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
@@ -75,12 +80,60 @@ BOS_TOKEN = "<|reserved_0|>"
 # Data download
 # ---------------------------------------------------------------------------
 
+def _sha256_path(path):
+    return path + ".sha256"
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_sha256(path):
+    hash_path = _sha256_path(path)
+    temp_path = hash_path + ".tmp"
+    with open(temp_path, "w", encoding="ascii") as f:
+        f.write(_sha256_file(path) + "\n")
+    os.replace(temp_path, hash_path)
+
+
+def _verify_cached_shard(path):
+    hash_path = _sha256_path(path)
+    if not os.path.exists(path):
+        return False, "missing shard"
+    if not os.path.exists(hash_path):
+        return False, "missing hash"
+    with open(hash_path, "r", encoding="ascii") as f:
+        expected = f.read().strip()
+    if len(expected) != 64:
+        return False, "invalid hash"
+    if _sha256_file(path) != expected:
+        return False, "SHA-256 mismatch"
+    return True, None
+
+
+def _remove_cached_shard(path):
+    for candidate in [path, _sha256_path(path), path + ".tmp", _sha256_path(path) + ".tmp"]:
+        if os.path.exists(candidate):
+            try:
+                os.remove(candidate)
+            except OSError:
+                pass
+
+
 def download_single_shard(index):
     """Download one parquet shard with retries. Returns True on success."""
     filename = f"shard_{index:05d}.parquet"
     filepath = os.path.join(DATA_DIR, filename)
-    if os.path.exists(filepath):
+    ok, reason = _verify_cached_shard(filepath)
+    if ok:
         return True
+    if os.path.exists(filepath) or os.path.exists(_sha256_path(filepath)):
+        print(f"  Re-downloading {filename} ({reason})")
+        _remove_cached_shard(filepath)
 
     url = f"{BASE_URL}/{filename}"
     max_attempts = 5
@@ -93,17 +146,13 @@ def download_single_shard(index):
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
-            os.rename(temp_path, filepath)
+            os.replace(temp_path, filepath)
+            _write_sha256(filepath)
             print(f"  Downloaded {filename}")
             return True
         except (requests.RequestException, IOError) as e:
             print(f"  Attempt {attempt}/{max_attempts} failed for {filename}: {e}")
-            for path in [filepath + ".tmp", filepath]:
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
+            _remove_cached_shard(filepath)
             if attempt < max_attempts:
                 time.sleep(2 ** attempt)
     return False
@@ -117,8 +166,8 @@ def download_data(num_shards, download_workers=8):
     if VAL_SHARD not in ids:
         ids.append(VAL_SHARD)
 
-    # Count what's already downloaded
-    existing = sum(1 for i in ids if os.path.exists(os.path.join(DATA_DIR, f"shard_{i:05d}.parquet")))
+    # Only verified shards are trusted for reuse
+    existing = sum(1 for i in ids if _verify_cached_shard(os.path.join(DATA_DIR, f"shard_{i:05d}.parquet"))[0])
     if existing == len(ids):
         print(f"Data: all {len(ids)} shards already downloaded at {DATA_DIR}")
         return
@@ -159,18 +208,64 @@ def text_iterator(max_chars=1_000_000_000, doc_cap=10_000):
                     return
 
 
-def train_tokenizer():
-    """Train BPE tokenizer using rustbpe, save as tiktoken pickle."""
-    tokenizer_pkl = os.path.join(TOKENIZER_DIR, "tokenizer.pkl")
-    token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.npy")
-    # Also check for legacy .pt format
-    token_bytes_pt = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
+def _serialize_mergeable_ranks(mergeable_ranks):
+    """Serialize bytes->int ranks to JSON-safe base64 pairs."""
+    return [
+        [base64.b64encode(token).decode("ascii"), int(rank)]
+        for token, rank in mergeable_ranks.items()
+    ]
 
-    if os.path.exists(tokenizer_pkl) and (os.path.exists(token_bytes_path) or os.path.exists(token_bytes_pt)):
+
+def _deserialize_mergeable_ranks(encoded_items):
+    """Deserialize base64 pairs back to bytes->int ranks."""
+    return {
+        base64.b64decode(token_b64.encode("ascii")): int(rank)
+        for token_b64, rank in encoded_items
+    }
+
+
+def _save_tokenizer_config(path, pattern, mergeable_ranks, special_tokens):
+    payload = {
+        "name": "rustbpe",
+        "pat_str": pattern,
+        "mergeable_ranks": _serialize_mergeable_ranks(mergeable_ranks),
+        "special_tokens": {k: int(v) for k, v in special_tokens.items()},
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+
+def _load_tokenizer_config(path):
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    mergeable_ranks = _deserialize_mergeable_ranks(payload["mergeable_ranks"])
+    special_tokens = {k: int(v) for k, v in payload["special_tokens"].items()}
+    return tiktoken.Encoding(
+        name=payload.get("name", "rustbpe"),
+        pat_str=payload["pat_str"],
+        mergeable_ranks=mergeable_ranks,
+        special_tokens=special_tokens,
+    )
+
+
+def train_tokenizer():
+    """Train BPE tokenizer using rustbpe, save tokenizer config as JSON."""
+    tokenizer_config = os.path.join(TOKENIZER_DIR, TOKENIZER_CONFIG_FILENAME)
+    token_bytes_path = os.path.join(TOKENIZER_DIR, TOKEN_BYTES_FILENAME)
+    # Also check for legacy formats
+    token_bytes_pt = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
+    legacy_pkl = os.path.join(TOKENIZER_DIR, LEGACY_TOKENIZER_PICKLE)
+
+    if os.path.exists(tokenizer_config) and (os.path.exists(token_bytes_path) or os.path.exists(token_bytes_pt)):
         print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
         # Migrate .pt to .npy if needed
         if os.path.exists(token_bytes_pt) and not os.path.exists(token_bytes_path):
             _migrate_token_bytes(token_bytes_pt, token_bytes_path)
+        return
+
+    # Also accept legacy pickle (but will re-save as JSON on next train)
+    if os.path.exists(legacy_pkl) and not os.path.exists(tokenizer_config):
+        print(f"Tokenizer: legacy tokenizer.pkl found. Re-run prepare.py to regenerate as secure JSON format.")
         return
 
     os.makedirs(TOKENIZER_DIR, exist_ok=True)
@@ -200,12 +295,11 @@ def train_tokenizer():
         special_tokens=special_tokens,
     )
 
-    # Save tokenizer
-    with open(tokenizer_pkl, "wb") as f:
-        pickle.dump(enc, f)
+    # Save tokenizer config (JSON) to avoid unsafe pickle deserialization
+    _save_tokenizer_config(tokenizer_config, pattern, mergeable_ranks, special_tokens)
 
     t1 = time.time()
-    print(f"Tokenizer: trained in {t1 - t0:.1f}s, saved to {tokenizer_pkl}")
+    print(f"Tokenizer: trained in {t1 - t0:.1f}s, saved to {tokenizer_config}")
 
     # --- Build token_bytes lookup for BPB evaluation ---
     print("Tokenizer: building token_bytes lookup...")
@@ -256,8 +350,16 @@ class Tokenizer:
 
     @classmethod
     def from_directory(cls, tokenizer_dir=TOKENIZER_DIR):
-        with open(os.path.join(tokenizer_dir, "tokenizer.pkl"), "rb") as f:
-            enc = pickle.load(f)
+        tokenizer_config = os.path.join(tokenizer_dir, TOKENIZER_CONFIG_FILENAME)
+        legacy_pickle = os.path.join(tokenizer_dir, LEGACY_TOKENIZER_PICKLE)
+        if not os.path.exists(tokenizer_config):
+            if os.path.exists(legacy_pickle):
+                raise RuntimeError(
+                    "Legacy tokenizer.pkl detected. For security reasons this file is no longer loaded. "
+                    "Run prepare.py again to regenerate tokenizer.json."
+                )
+            raise FileNotFoundError(f"Tokenizer config not found: {tokenizer_config}")
+        enc = _load_tokenizer_config(tokenizer_config)
         return cls(enc)
 
     def get_vocab_size(self):

@@ -196,7 +196,7 @@ class GPT(nn.Module):
 
     def _compute_window_sizes(self, config):
         pattern = config.window_pattern.upper()
-        assert all(c in "SL" for c in pattern)
+        assert all(c in "SL" for c in pattern), f"WINDOW_PATTERN must only contain S or L, got: {pattern}"
         long_window = config.sequence_len
         short_window = long_window // 2
         char_to_window = {"L": (long_window, 0), "S": (short_window, 0)}
@@ -448,7 +448,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
 DEPTH = 6               # number of transformer layers
-DEVICE_BATCH_SIZE = 32   # per-device batch size (reduce if OOM)
+DEVICE_BATCH_SIZE = int(os.environ.get("DEVICE_BATCH_SIZE", 32))  # per-device batch size (reduce if OOM)
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -493,8 +493,10 @@ num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
-assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
+assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0, \
+    f"DEVICE_BATCH_SIZE={DEVICE_BATCH_SIZE} does not evenly divide TOTAL_BATCH_SIZE={TOTAL_BATCH_SIZE} (tokens_per_fwdbwd={tokens_per_fwdbwd})"
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
+assert grad_accum_steps > 0, "TOTAL_BATCH_SIZE must be >= DEVICE_BATCH_SIZE * MAX_SEQ_LEN"
 
 optimizer = model.setup_optimizer(
     unembedding_lr=UNEMBEDDING_LR,
@@ -605,6 +607,9 @@ print()  # newline after \r training log
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
+# Save checkpoint before eval so training isn't lost if eval crashes
+torch.save(model.state_dict(), "checkpoint.pt")
+
 # Final eval
 model.eval()
 with autocast_ctx:
@@ -626,3 +631,4 @@ print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
+print(f"startup_seconds:  {startup_time:.1f}")
