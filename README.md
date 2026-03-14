@@ -1,76 +1,72 @@
 # (auto) autoresearch
 
-This is the search, on top of Karpathy's hyperparameter search. Basically, it's a search for a search.
+A combined fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch) integrating ideas from the most innovative community forks: a creative director framework, Apple Neural Engine training, dual-backend MPS/MLX support, and continue-pretraining experiments.
 
-## My Idea
+---
 
-Karpathy's autoresearch is brilliant. It works, but there is a catch: the "Blank Page Problem" of AI. LLMs are fundamentally reactive engines. They are designed to follow, not to lead. If the leader (the user) is asleep, the follower (the agent) defaults to the "average" of all its knowledge, which is mediocre and boring, and gravitates toward safe, incremental moves.
+## What is autoresearch?
 
-But move 37 was neither safe nor average.
+An AI agent autonomously trains a small GPT model: modify code, run a 5-minute experiment, check if `val_bpb` improved, keep or discard, repeat overnight. The metric is **val_bpb** (validation bits per byte) — lower is better, vocab-size-independent.
 
-To fix this, we need another piece of software that acts as a "Chaos Monkey" or a "Creative Director." Think of it as the mutation rate in a genetic algorithm; without it, you can get stuck in a local minimum forever.
+## Quick start
 
-This repo is my attempt to build that monkey. This is a search for a search.
+**NVIDIA GPU (upstream baseline):**
+```bash
+uv sync
+uv run prepare.py
+uv run train.py
+```
 
-## Director Architecture (from ArmanJR-Lab)
+**Apple Silicon — MLX (recommended):**
+```bash
+uv sync --extra mlx
+uv run prepare.py
+uv run train_mlx.py
+```
 
-Each experiment method lives in its own directory with `train.py`, `prepare.py`, and `program.md`. The `baseline/` directory is Karpathy's vanilla autoresearch loop. Other directories (e.g. `mad-scientist/`) add a **director** — a Go binary that generates creative research directives before each experiment iteration. The director works in three steps:
+**Apple Silicon — MPS:**
+```bash
+uv sync --extra mps
+uv run prepare.py
+uv run train.py
+```
 
-1. **Summarize** the current `train.py` via DeepSeek Chat (so it always knows the actual code state)
+**Apple Neural Engine (native Obj-C):**
+```bash
+cd native && make all
+make test-ane
+./build/train_overnight_nl6_s512 --steps 10000 --scratch --lr 2e-4 \
+  --data data/train.bin --val data/val.bin
+```
+
+**Autonomous agent mode:**
+```bash
+claude --dangerously-skip-permissions -p "Read program.md and start autoresearch."
+```
+
+---
+
+## Merged Forks
+
+This repo combines work from four forks, each with a different angle:
+
+### 1. Director Framework (from [ArmanJR-Lab](https://github.com/ArmanJR-Lab/autoautoresearch))
+
+A Go binary ("director") that acts as a Creative Director / Chaos Monkey — generating research directives to escape local minima. It works in three steps:
+
+1. **Summarize** the current `train.py` via DeepSeek Chat
 2. **Fetch** a random ML paper abstract from arxiv (external novelty injection)
-3. **Generate** a directive via DeepSeek Reasoner, combining code summary + experiment history + paper into one specific idea
+3. **Generate** a directive via DeepSeek Reasoner, framed as a suggestion
 
-The output is a tentative suggestion ("I think you could try...") so the upstream agent reasons about it rather than blindly executing.
-
-> I chose Go because I wanted the running agent to have absolutely zero context about the director and to see it as a black box. Just a binary that spits out ideas.
-
-### Director Structure
-
-```
-baseline/                 # vanilla autoresearch (control group)
-  train.py, prepare.py, program.md
-  .claude/                # agent confinement (hooks + settings)
-
-mad-scientist/            # experiment with director-driven exploration
-  train.py, prepare.py, program.md, director, .env
-  .claude/                # agent confinement (hooks + settings)
-
-mad-scientist-3-11/       # second director run (full paper summaries, lower temp)
-  train.py, prepare.py, program.md, director, .env
-  .claude/                # agent confinement (hooks + settings)
-
-director/                 # director source code
-  main.go
-  configs/*.json          # per-experiment config (prompts, arxiv terms, model, temp)
-  logs/api_calls.jsonl    # centralized API call log across all experiments
-  .env                    # DEEPSEEK_API_KEY
-
-results/                  # tracking (gitignored)
-  <method>/<run-id>/results.tsv
-
-analysis.ipynb            # cross-method comparison (envelope, terminal perf, stall)
-Makefile
-```
-
-### Current Experiments
+Each experiment method lives in its own directory:
 
 | Name | Director | Description |
 |------|----------|-------------|
-| `baseline` | None | Vanilla autoresearch. The agent decides what to try next on its own. Control group. |
-| `mad-scientist` | DeepSeek Reasoner (temp 1.2) | Summarizes current code, reads experiment history, fetches a random ML paper abstract from arxiv, then generates a bold directive framed as a suggestion. Combines code awareness + historical context + external novelty. |
-| `mad-scientist-3-11` | DeepSeek Reasoner (temp 1.0) | Iteration on mad-scientist: feeds full paper summaries (not just abstracts) via DeepSeek-summarized ar5iv fetches, narrower arxiv categories (cs.LG + cs.CL only), stricter system prompt with scale-awareness rules and history-dedup guidance. |
+| `baseline/` | None | Vanilla autoresearch (control group) |
+| `mad-scientist/` | DeepSeek Reasoner (temp 1.2) | Code summary + experiment history + paper abstract → bold directive |
+| `mad-scientist-3-11/` | DeepSeek Reasoner (temp 1.0) | Full paper summaries, narrower arxiv categories, stricter prompts |
 
-#### Director config differences: mad-scientist vs mad-scientist-3-11
-
-| | `mad-scientist` | `mad-scientist-3-11` |
-|---|---|---|
-| Temperature | 1.2 | 1.0 |
-| Paper input | Abstract only (`{{paper_abstract}}`) | Full summary (`{{paper_abstract}}` + `{{paper_summary}}`) |
-| arxiv categories | 5 (cs.LG, cs.CL, cs.AI, cs.CV, stat.ML) | 2 (cs.LG, cs.CL) |
-| System prompt | Generic "small GPT", loose rules | Specifies ~10M params, stricter rules (read history, one thing at a time, scale-aware) |
-| Max response | Not specified | 3 paragraphs |
-
-#### Mad-Scientist Runs vs Original Baseline (Karpathy's H100)
+**Results vs Karpathy's H100 baseline:**
 
 ![Relative improvement trajectory](h2h_relative_improvement.png)
 
@@ -79,207 +75,152 @@ Makefile
 | Experiments | 126 | 96 | 96 |
 | Keeps (rate) | 23 (18.3%) | 22 (22.9%) | 16 (16.7%) |
 | Total improvement | 2.83% | 3.94% | 2.79% |
-| Improvement/experiment | 0.0224% | 0.0411% | 0.0291% |
-| Longest stall | 25 | 15 | 31 |
 | Best BPB | 0.969686 | 1.286357 | 1.302036 |
 
-**mad-scientist** remains the strongest run — highest keep rate, most total improvement, and shortest stalls. **mad-scientist-3-11** underperformed despite having richer paper context: lower keep rate (16.7% vs 22.9%), less total improvement (2.79% vs 3.94%), and a 31-iteration stall at the end where it couldn't break past 1.302. The tighter prompt and lower temperature may have over-constrained the director, producing more conservative suggestions that failed to escape local minima.
-
-##### Key moments from mad-scientist (run 1)
-
-The biggest single jump came at **iteration 44** — the agent removed the logit softcap (tanh clamping at ±15), dropping val_bpb from 1.309 to 1.299 in one step. Notably, the director had suggested something entirely different (linear attention to break an 8-iteration stall), but the researcher agent ignored it and made a simpler, more effective change on its own. The director's value here was indirect: by flagging the stall and pushing for radical action, it prompted the agent to re-examine the code and spot the softcap as dead weight — something it had overlooked for 43 iterations.
-
-The second jump came at **iteration 67** — this time the agent followed the director's advice almost exactly. After another 8-iteration stall (best stuck at 1.294), the director suggested reducing attention heads from 6 to 4 while increasing HEAD_DIM from 64 to 96 to preserve the embedding dimension. No paper was fetched; this was purely the director's own reasoning. The agent implemented it verbatim (val_bpb 1.294 → 1.290), then kept pushing the same idea through iterations 68–69 (HEAD_DIM=128 → 192), reaching 1.287 before single-head attention went too far. Both jumps were triggered by the same stall-detection mechanism ("8 consecutive failures → go radical"), but with opposite dynamics: iteration 44 succeeded by ignoring the director, iteration 67 by following it.
-
-##### Key moments from mad-scientist-3-11 (run 2)
-
-The biggest breakthrough came at **iteration 43** — replacing ReLU² with SwiGLU activation (iso-parameter), jumping from 1.316 to 1.306. This was followed by a productive stretch (iterations 47–65) of incremental optimizer tuning that pushed BPB down to 1.302. After iteration 65, the run hit a wall: 31 consecutive experiments without improvement, exploring attention tweaks, initialization changes, and architectural modifications — none broke through.
-
-### Director Commands
-
 ```bash
-# List available director configs
-make list
-
-# Build + deploy director for an experiment (default: linux/arm64 for NVIDIA Jetson)
-make deploy EXPERIMENT=mad-scientist
-
-# Build for local macOS instead
-make deploy EXPERIMENT=mad-scientist GOOS=darwin GOARCH=arm64
-
-# Run the director (from inside an experiment directory)
-./director --verbose
-
-# Run training (from inside an experiment directory)
-python3 train.py
+make list                                    # list director configs
+make deploy EXPERIMENT=mad-scientist         # build + deploy director
 ```
 
-### Adding a new experiment method
+### 2. Apple Neural Engine (from [ncdrone](https://github.com/ncdrone/autoresearch-ANE))
 
-1. Copy `baseline/` to a new directory
-2. Create `director/configs/<name>.json` with custom system prompt, user prompt, arxiv terms, model, temperature
-3. `make deploy EXPERIMENT=<name>`
-4. Edit `program.md` in the new directory to integrate the director into the loop
+Three accelerators on one chip — ANE via native Obj-C, GPU via MLX, GPU via MPS:
+
+- **ANE**: 67.6M param GPT, ~99ms/step, invisible to Activity Monitor, runs alongside GPU
+- **MLX**: ~50M param GPT, val_bpb=1.665 baseline
+- **MPS**: 11.5M param GPT, val_bpb=1.308 after 79 experiments
+
+Key innovations:
+- Dynamic weight pipeline: weights packed into IOSurface, `memcpy` updates (no recompilation)
+- SRAM wall at SEQ=1024, depth U-curve at SEQ=512
+- Multi-agent gossip protocol for cross-pollination between ANE/MLX agents
+
+### 3. Dual-Backend MPS + MLX (from [elementalcollision](https://github.com/elementalcollision/autoresearch))
+
+Full Muon optimizer ported to both PyTorch MPS and MLX, with critical bug fixes:
+
+- **Newton-Schulz NaN fix**: bf16 Frobenius norm loses precision in MLX (doesn't upcast like PyTorch). Large matrices (512x2048) cause spectral norm >1, Newton-Schulz coefficients amplify error exponentially. Fix: run orthogonalization in float32.
+- **NaN fast-fail blindspot**: `NaN > 100` is `False` in Python — NaN loss was silently ignored for entire 5-min runs. Fix: add `math.isnan()` check.
+- **MLX optimizer KeyError**: `value_embeds` uses dict keys ("0","1"...) not list indices — path navigation assumed lists only.
+- **bf16 attention mask overflow**: `-inf` in bf16 + large scores = NaN. Fix: float32 masks.
+- **Hardware auto-detection**: Identifies M1-M4 chip tier, scales hyperparams per chip.
+
+Cross-chip results:
+
+| Chip | Memory | Best val_bpb | Peak mem | Steps |
+|------|--------|-------------|----------|-------|
+| **M4 Pro** | 24 GB | **1.429** | 4.5 GB | 751 |
+| M1 Max | 64 GB | 1.621 | 11.3 GB | ~210 |
+
+Key insight: smaller batches → more optimizer steps → better results within the fixed 5-min budget.
+
+### 4. Qwen Continue-Pretrain (from [CrystinVW](https://github.com/CrystinVW/autoresearch-mps))
+
+Lives in `qwen-mps/`. A fundamentally different approach: continue-pretraining **Qwen3.5-0.8B** via HuggingFace transformers instead of training a GPT from scratch.
+
+- Uses **Adafactor** optimizer (memory-efficient, no second moment storage)
+- 19 methodical experiments: val_bpb 0.7818 → 0.7778
+- Key findings: freezing embeddings saves 1GB, LR 4-6e-6 beats higher, cooldown ratio 0.7 optimal
 
 ---
 
-## Apple Neural Engine Training (from ncdrone)
+## Project Structure
 
-**Apple Silicon LLM training — three accelerators, one chip.**
+```
+# Upstream baseline (CUDA)
+train.py                    NVIDIA GPU training (agent modifies this)
+prepare.py                  Data prep, tokenizer, evaluation (read-only)
+program.md                  Agent instructions
 
-Autonomous AI research on M4 Max using all three compute paths Apple Silicon offers: the Apple Neural Engine (ANE) via native Obj-C, the GPU via MLX, and the GPU via PyTorch/MPS. Forked from [Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
+# Director framework (ArmanJR-Lab)
+baseline/                   Vanilla autoresearch (control group)
+mad-scientist/              Director-driven exploration
+mad-scientist-3-11/         Refined director variant
+director/                   Go director source + configs
+analysis.ipynb              Cross-method comparison
 
-Same protocol: an AI agent modifies training code, runs 5-minute experiments, evaluates `val_bpb`, keeps or discards, and loops overnight. But instead of one H100, we're running on a laptop chip — and discovering what works (and what doesn't) on Apple Silicon.
+# Apple Neural Engine (ncdrone)
+native/                     ANE hardware-level training (Obj-C, private APIs)
+  runtime/                  ANE interface (_ANEInMemoryModel, IOSurface)
+  mil/                      MIL code generation, dynamic weight pipeline
+  training/                 Training loop, CPU fallback ops
+  bridge/                   C API for Python ctypes
+  probes/                   Hardware exploration (SRAM, weight patching)
 
-### ANE Results
+# Dual-backend MPS + MLX (elementalcollision)
+train_mlx.py                MLX training script (agent modifies this)
+backends/
+  __init__.py               Hardware detection, chip tier, hyperparameter suggestions
+  muon_mps.py               Muon+AdamW optimizer for PyTorch MPS
+  muon_mlx.py               Muon+AdamW optimizer for MLX (with NaN fixes)
 
-**ANE (native Obj-C, Apple Neural Engine):**
-- 67.6M param GPT, 6 layers, SEQ=512, ~99ms/step
-- Best loss: 5.81 (LR=2e-4, 10K steps)
-- ANE is invisible to Activity Monitor — runs alongside GPU with zero interference
-- Key challenge: activation instability on long runs (cosine schedule must match run length)
+# MLX GPU training (ncdrone, from trevin-creator)
+mlx/                        MLX training port
+  train.py, prepare.py, program.md
 
-**MPS (PyTorch, Metal GPU):**
-- 11.5M param GPT, val_bpb=1.308 after 79 autonomous experiments
-- bf16 confirmed 2.6x slower on Apple Silicon — fp32 is faster
-- H100 findings (embedding WD, init scaling) do not transfer to MPS
+# Qwen continue-pretrain (CrystinVW)
+qwen-mps/                   Qwen3.5-0.8B continue-pretraining on MPS
 
-**MLX (Apple's native ML framework) — [`mlx/`](mlx/):**
-- ~50M param GPT, val_bpb=1.665 baseline (agent optimizing now)
-- Native bf16, unified memory, no translation layer
-- Replaced MPS — ported from [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx)
+# Visualization & analysis
+viz/                        Result visualization scripts
+karpathy/                   Reference baseline results
+```
 
-### ANE Quick Start
+## Backend Selection
+
+The system auto-detects the best backend (prefers MLX). Override with:
 
 ```bash
-# ANE (native, macOS Apple Silicon only)
-cd native && make all
-make test-ane              # verify ANE hardware access
-make bench-sram            # probe SRAM performance cliffs
-./build/train_overnight_nl6_s512 --steps 10000 --scratch --lr 2e-4 \
-  --data data/train.bin --val data/val.bin
-
-# MLX (recommended for Apple Silicon GPU)
-cd mlx && uv sync
-uv run prepare.py --num-shards 8
-uv run train.py
-
-# MPS (retired, kept for reference)
-cp pyproject_mac.toml pyproject.toml && uv sync
-uv run prepare.py --num-shards 8
-uv run train_mac.py
+AUTORESEARCH_BACKEND=mlx uv run train.py    # Force MLX
+AUTORESEARCH_BACKEND=mps uv run train.py    # Force MPS
+uv run train_mlx.py                          # Run MLX directly
 ```
 
-### ANE Architecture
+### Hardware-adaptive defaults
 
-```
-native/             — ANE hardware-level training (Obj-C, private APIs)
-  runtime/          — ANE interface (_ANEInMemoryModel, IOSurface)
-  mil/              — MIL code generation, dynamic weight pipeline
-  training/         — training loop, CPU fallback ops (RMSNorm, Adam)
-  bridge/           — C API for Python ctypes
-  probes/           — hardware exploration (SRAM limits, weight patching)
+| Chip tier | Memory | Model depth | Device batch | Total batch |
+|-----------|--------|-------------|-------------|-------------|
+| Base (M1-M4) | 8-24 GB | 4 | 8 | 32K tokens |
+| Pro | 18-36 GB | 6 | 16 | 64K tokens |
+| Max | 36-128 GB | 8 | 32 | 128K tokens |
+| Ultra | 64-192 GB | 10 | 64 | 256K tokens |
 
-mlx/                — MLX GPU training (Apple's native ML framework)
-  train.py          — model + optimizer + loop (agent modifies this)
-  prepare.py        — data prep, tokenizer, evaluation (read-only)
-  program.md        — agent instructions
+## Technical Notes
 
-train.py            — NVIDIA GPU training (upstream, CUDA)
-train_mac.py        — Apple Silicon training (MPS backend, retired)
-prepare.py          — data prep, tokenizer, evaluation (read-only)
-program.md          — agent instructions
-viz/                — result visualizations
-```
+### MPS backend
+- No `torch.compile` (not supported on MPS)
+- All optimizer arithmetic in float32 to avoid mixed-dtype crashes
+- Nesterov momentum uses explicit `mul_/add_` instead of `lerp_` (MPS dtype issue)
 
-### Key concept: dynamic weight pipeline (ANE)
+### MLX backend
+- Newton-Schulz orthogonalization in float32 (bf16 precision loss causes NaN)
+- Gradient accumulation via `tree_map`
+- Explicit `mx.eval()` calls for lazy evaluation control
 
-Weights are packed into the IOSurface input alongside activations. Kernels compile once at startup; weight updates are just `memcpy` — no recompilation needed. This is the core innovation over [maderix/ANE](https://github.com/maderix/ANE) which rebaked weights into compiled kernels.
-
-### Key findings
-
-- **ANE: 6x bigger model, 8x faster** than MPS on the same chip
-- **Both accelerators run simultaneously** with zero interference
-- **ANE timing breakdown:** 33% ANE compute, 30% IO, 37% CPU (classifier is 22% bottleneck)
-- **Depth U-curve at SEQ=512:** NL=4(6.74) → NL=6(6.34) → NL=8(6.94) → NL=12(7.14)
-- **SRAM wall at SEQ=1024** — ANE runs out of on-chip memory
-- **Cosine schedule length must match actual run length** or activations explode
-
----
-
-## Jetson AGX Orin Port
-
-This fork has been adapted to run on an **NVIDIA Jetson AGX Orin 32GB** (JetPack 6, CUDA 12.6, PyTorch 2.10). The key changes from upstream:
-
-- **Replaced Flash Attention 3** with PyTorch's built-in `scaled_dot_product_attention` (FA3/kernels package targets Hopper/desktop Ampere and doesn't build on Jetson's SM 8.7).
-- **Removed `torch.compile`** — Triton is not available on aarch64, so the inductor backend fails. Model and optimizer run in eager mode.
-- **Removed `kernels` dependency** and the pinned torch CUDA index from `pyproject.toml` (Jetson uses its own JetPack-provided PyTorch).
-- **Tuned hyperparameters** for the Orin's ~5–24 TFLOPS BF16 throughput (size-dependent) and 30 GB unified memory.
-
-### Setup on Jetson
-
-```bash
-# Install deps (torch is already provided by JetPack)
-pip3 install rustbpe tiktoken pyarrow requests numpy pandas matplotlib
-
-# Clone and prep
-git clone <repo-url> && cd autoresearch
-python3 prepare.py    # download data + train tokenizer
-python3 train.py      # baseline run (~5 min)
-```
-
-### Hyperparameter sweep results
-
-All runs use the fixed 5-minute time budget on a Jetson AGX Orin 32GB with `MAX_SEQ_LEN=512`, `HEAD_DIM=64`, `WINDOW_PATTERN="L"`:
-
-| DEPTH | DEVICE_BATCH_SIZE | TOTAL_BATCH_SIZE | val_bpb | Steps | Params | VRAM |
-|-------|-------------------|------------------|---------|-------|--------|------|
-| 4 | 16 | 2^15 | 1.488 | 872 | 11.5M | 1.2 GB |
-| 8 | 32 | 2^17 | 1.519 | 95 | 50.3M | 6.2 GB |
-| 6 | 32 | 2^17 | 1.419 | 147 | 26.3M | 4.4 GB |
-| 6 | 32 | 2^16 | 1.357 | 279 | 26.3M | 4.4 GB |
-| 6 | 32 | 2^15 | 1.341 | 535 | 26.3M | 4.4 GB |
-| **6** | **32** | **2^14** | **1.338** | **1018** | **26.3M** | **4.3 GB** |
-
-The best configuration is **DEPTH=6, DEVICE_BATCH_SIZE=32, TOTAL_BATCH_SIZE=2^14** (the current defaults in this fork).
-
----
-
-## Running the agent
-
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
-
-Each experiment directory includes a `.claude/` folder with a `PreToolUse` hook (`cage.sh`) that prevents the agent from reading or writing files outside its own directory. This ensures experiments stay isolated and agents can't accidentally clobber each other's files.
-
-```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
-```
-
-```bash
-claude --dangerously-skip-permissions -p "Read program.md and start autoresearch."
-```
-
-## Platform support
-
-This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
-
-For running on smaller compute platforms (Macbooks etc.), see the ANE section above, or try one of the notable forks below.
-
-## Notable forks
-
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
-- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
+### ANE backend
+- Dynamic weight pipeline: weights in IOSurface, memcpy updates
+- 33% ANE compute, 30% IO, 37% CPU (classifier is 22% bottleneck)
+- SRAM wall at SEQ=1024
 
 ## Credits
 
 - [Andrej Karpathy](https://github.com/karpathy) — autoresearch concept and nanochat
 - [ArmanJR-Lab](https://github.com/ArmanJR-Lab/autoautoresearch) — Go director framework and mad-scientist experiments
 - [ncdrone](https://github.com/ncdrone/autoresearch-ANE) — ANE native training, MLX port, multi-agent gossip
-- [trevin-creator](https://github.com/trevin-creator) — [MLX port](https://github.com/trevin-creator/autoresearch-mlx) that `mlx/` is based on
-- [miolini](https://github.com/miolini) — [MPS/macOS port](https://github.com/miolini/autoresearch-macos)
-- [maderix](https://github.com/maderix) — [ANE private API](https://github.com/maderix/ANE) reverse engineering
+- [elementalcollision](https://github.com/elementalcollision/autoresearch) — Dual MPS/MLX backend, Muon optimizer port, Newton-Schulz NaN fix
+- [CrystinVW](https://github.com/CrystinVW/autoresearch-mps) — Qwen3.5-0.8B continue-pretrain, Adafactor, methodical experiments
+- [trevin-creator](https://github.com/trevin-creator) — Original MLX port
+- [miolini](https://github.com/miolini) — MPS/macOS port
+- [maderix](https://github.com/maderix) — ANE private API reverse engineering
 - [Apple MLX team](https://github.com/ml-explore/mlx)
+
+## Notable forks (not merged)
+
+- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) — Canonical macOS MPS port (1,099 stars)
+- [mutable-state-inc/autoresearch-at-home](https://github.com/mutable-state-inc/autoresearch-at-home) — Collaborative distributed platform (321 stars)
+- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) — Windows + RTX auto-profiling (195 stars)
+- [Aum08Desai/test-time-rl-discover](https://github.com/Aum08Desai/test-time-rl-discover-autoresearch) — RL-based config discovery
+- [matt-langston/autoresearch](https://github.com/matt-langston/autoresearch) — DGX Spark (Blackwell), zero-diff wrapper
 
 ## License
 
