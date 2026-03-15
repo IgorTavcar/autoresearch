@@ -12,6 +12,8 @@ To set up a new experiment, work with the user to:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
    - `train.py` — the file you modify. Model architecture, optimizer, training loop.
+   - `findings.md` — accumulated knowledge from prior sessions (if it exists). Read this first.
+   - `guidance.md` — human steering notes (if it exists). Follow any directions here.
 4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
@@ -24,6 +26,7 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **What you CAN do:**
 - Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
+- Update `findings.md` — you must keep this file current (see Knowledge Management below).
 
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
@@ -87,13 +90,62 @@ c3d4e5f	1.005000	44.0	discard	switch to GeLU activation
 d4e5f6g	0.000000	0.0	crash	double model width (OOM)
 ```
 
+## Knowledge management
+
+You maintain two files to preserve knowledge across experiments and sessions:
+
+### `findings.md` — what you know (required)
+
+After every 5 experiments (or after any significant discovery), update `findings.md`. This is the compressed knowledge that future sessions will read instead of parsing hundreds of results.tsv entries. Keep it under 200 lines. Structure:
+
+```markdown
+## Current best
+val_bpb: X.XXXXXX (iter N, commit abc1234)
+Key config: depth=N, dim=N, batch=N, LR=X, ...
+
+## What works
+- [finding]: [evidence from which iter(s)]
+
+## What doesn't work
+- [thing tried]: [why it failed, iter(s)]
+
+## Structural findings
+- [architectural insight]: [evidence]
+
+## Unexplored directions
+- [idea]: [why it might work]
+```
+
+Commit `findings.md` to the branch alongside successful experiments. This file is your institutional memory — without it, the next session will waste GPU time re-discovering what you already know.
+
+### `guidance.md` — human steering (optional, read-only for you)
+
+If this file exists, read it before planning each experiment. It contains directions from the human operator. You must follow guidance.md directions. You must NOT modify this file.
+
+## Stagnation detection
+
+Track your improvement trajectory. You are in a **stagnation plateau** when:
+- The last 5+ kept experiments each improved val_bpb by less than 0.1% relative
+- OR the last 8+ experiments were all discarded/crashed
+
+When you detect stagnation, **switch modes**:
+
+1. **Stop parameter tuning.** Small LR/WD/batch adjustments will not break through a structural ceiling.
+2. **Write a stagnation note** in findings.md: document the current ceiling, what parameter space you've exhausted, and why you believe the architecture is the bottleneck.
+3. **Try structural changes**: fundamentally different architectures, not incremental tweaks.
+4. **Rewind if needed.** If structural exploration leads to 3+ consecutive crashes or regressions, rewind to the last known good commit and try a *different* structural direction.
+
 ## The experiment loop
 
 The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
 
 LOOP FOREVER:
 
-1. Look at the git state: the current branch/commit we're on
+1. **Plan** (guidance step):
+   - Read `guidance.md` if it exists — follow any human directions.
+   - Read `findings.md` if it exists — review what's known.
+   - Check for stagnation (see above).
+   - Decide: parameter tuning or structural exploration? Write a one-line rationale.
 2. Tune `train.py` with an experimental idea by directly hacking the code.
 3. git commit
 4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
