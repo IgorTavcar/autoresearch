@@ -144,7 +144,7 @@ class GPT(nn.Module):
         })
         # Rotary embeddings
         self.rotary_seq_len = config.sequence_len
-        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim, base=ROPE_BASE)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -155,7 +155,7 @@ class GPT(nn.Module):
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
         # Transformer blocks
         n_embd = self.config.n_embd
-        s = 3**0.5 * n_embd**-0.5
+        s = 3**0.5 * n_embd**-0.5 * INIT_SCALE
         for block in self.transformer.h:
             torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
@@ -165,7 +165,7 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)
-        self.x0_lambdas.fill_(0.1)
+        self.x0_lambdas.fill_(X0_INIT)
         # Value embeddings
         for ve in self.value_embeds.values():
             torch.nn.init.uniform_(ve.weight, -s, s)
@@ -175,7 +175,7 @@ class GPT(nn.Module):
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)
         # Rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
-        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim, base=ROPE_BASE)
         self.cos, self.sin = cos, sin
         # Cast embeddings to bf16
         self.transformer.wte.to(dtype=torch.bfloat16)
@@ -198,7 +198,7 @@ class GPT(nn.Module):
         pattern = config.window_pattern.upper()
         assert all(c in "SL" for c in pattern), f"WINDOW_PATTERN must only contain S or L, got: {pattern}"
         long_window = config.sequence_len
-        short_window = long_window // 2
+        short_window = long_window // SHORT_WINDOW_DIV
         char_to_window = {"L": (long_window, 0), "S": (short_window, 0)}
         window_sizes = []
         for layer_idx in range(config.n_layer):
@@ -236,7 +236,8 @@ class GPT(nn.Module):
         }
 
     def setup_optimizer(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02,
-                        weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5):
+                        weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5,
+                        lm_head_wd=0.0, embedding_wd=0.0, value_embedding_wd=0.0):
         model_dim = self.config.n_embd
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
@@ -250,9 +251,9 @@ class GPT(nn.Module):
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         print(f"Scaling AdamW LRs by 1/sqrt({model_dim}/768) = {dmodel_lr_scale:.6f}")
         param_groups = [
-            dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=lm_head_wd),
+            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=embedding_wd),
+            dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=value_embedding_wd),
             dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
         ]
@@ -433,22 +434,33 @@ class MuonAdamW(torch.optim.Optimizer):
 ASPECT_RATIO = 64       # model_dim = depth * ASPECT_RATIO
 HEAD_DIM = 64           # target head dimension for attention
 WINDOW_PATTERN = "L"    # full attention (SDPA has no sliding window support)
+SHORT_WINDOW_DIV = 8    # short window = context / SHORT_WINDOW_DIV (Discussion #43)
+ROPE_BASE = 200000      # RoPE base frequency (Discussion #43)
 
 # Optimization
 TOTAL_BATCH_SIZE = 2**14 # ~16K tokens per optimizer step
-EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
-UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
+EMBEDDING_LR = 0.9      # learning rate for token embeddings (Adam) (Discussion #43: 0.6→0.9)
+UNEMBEDDING_LR = 0.005  # learning rate for lm_head (Adam) (Discussion #43: 0.004→0.005)
 MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
 SCALAR_LR = 0.5         # learning rate for per-layer scalars (Adam)
 WEIGHT_DECAY = 0.2      # cautious weight decay for Muon
 ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
 WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
-WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
-FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
+WARMDOWN_RATIO = 0.75   # fraction of time budget for LR warmdown (Discussion #43: 0.5→0.75)
+FINAL_LR_FRAC = 0.05    # final LR as fraction of initial (Discussion #43: 0.0→0.05)
+INIT_SCALE = 0.68       # init scale multiplier for attention/MLP weights (Discussion #43)
+X0_INIT = 0.05          # initial x0 skip scalar (Discussion #43: 0.1→0.05)
+LM_HEAD_WD = 0.01       # weight decay for lm_head (Discussion #43)
+EMBEDDING_WD = 0.001    # weight decay for token embeddings (Discussion #43)
+VALUE_EMBEDDING_WD = 0.003 # weight decay for value embeddings (Discussion #43)
 
 # Model size
 DEPTH = 6               # number of transformer layers
 DEVICE_BATCH_SIZE = int(os.environ.get("DEVICE_BATCH_SIZE", 32))  # per-device batch size (reduce if OOM)
+
+# Early structural triage
+TRIAGE_TIME = 60        # seconds into training; 0 to disable
+TRIAGE_KILL = 0.5       # kill if effective rank drops below this fraction of initial
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -506,6 +518,9 @@ optimizer = model.setup_optimizer(
     adam_betas=ADAM_BETAS,
     matrix_lr=MATRIX_LR,
     weight_decay=WEIGHT_DECAY,
+    lm_head_wd=LM_HEAD_WD,
+    embedding_wd=EMBEDDING_WD,
+    value_embedding_wd=VALUE_EMBEDDING_WD,
 )
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
@@ -526,11 +541,36 @@ def get_lr_multiplier(progress):
         return cooldown * 1.0 + (1 - cooldown) * FINAL_LR_FRAC
 
 def get_muon_momentum(step):
-    frac = min(step / 300, 1)
+    frac = min(step / 200, 1)
     return (1 - frac) * 0.85 + frac * 0.95
 
 def get_weight_decay(progress):
     return WEIGHT_DECAY * (1 - progress)
+
+@torch.no_grad()
+def structural_triage(model):
+    """Effective rank (spectral entropy) and gradient coherence of weight matrices."""
+    ranks, grad_groups = [], {}
+    for p in model.parameters():
+        if p.ndim != 2 or min(p.shape) < 64:
+            continue
+        s = torch.linalg.svdvals(p.float())
+        s = s / s.sum()
+        s = s[s > 1e-8]
+        ranks.append(-(s * s.log()).sum().exp().item())
+        if p.grad is not None:
+            grad_groups.setdefault(p.shape, []).append(p.grad.float().flatten())
+    eff_rank = sum(ranks) / len(ranks) if ranks else 0.0
+    sims = []
+    for grads in grad_groups.values():
+        for i in range(len(grads) - 1):
+            sims.append(F.cosine_similarity(grads[i].unsqueeze(0), grads[i+1].unsqueeze(0)).item())
+    coherence = sum(sims) / len(sims) if sims else 0.0
+    return eff_rank, coherence
+
+initial_rank, _ = structural_triage(model)
+triage_done = TRIAGE_TIME <= 0
+print(f"Initial effective rank: {initial_rank:.1f}")
 
 # ---------------------------------------------------------------------------
 # Training loop
@@ -551,6 +591,16 @@ while True:
         loss = loss / grad_accum_steps
         loss.backward()
         x, y, epoch = next(train_loader)
+
+    # Early structural triage (while gradients are still available)
+    if not triage_done and total_training_time >= TRIAGE_TIME:
+        triage_done = True
+        eff_rank, grad_coherence = structural_triage(model)
+        rank_ratio = eff_rank / initial_rank if initial_rank > 0 else 0
+        print(f"\n[triage@{total_training_time:.0f}s] rank={eff_rank:.1f} ({rank_ratio:.0%} of init) coherence={grad_coherence:.4f}")
+        if rank_ratio < TRIAGE_KILL:
+            print(f"[triage] KILL: effective rank collapsed to {rank_ratio:.0%} of initial")
+            exit(1)
 
     # Progress and schedules
     progress = min(total_training_time / TIME_BUDGET, 1.0)
@@ -633,6 +683,11 @@ print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
 print(f"startup_seconds:  {startup_time:.1f}")
+final_rank, _ = structural_triage(model)
+rank_retention = final_rank / initial_rank if initial_rank > 0 else 0
+print(f"eff_rank_init:    {initial_rank:.1f}")
+print(f"eff_rank_final:   {final_rank:.1f}")
+print(f"rank_retention:   {rank_retention:.4f}")
 
 # Write structured results to JSON (issue #64: mitigates prompt injection via stdout)
 import json as _json
