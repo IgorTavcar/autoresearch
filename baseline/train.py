@@ -8,8 +8,10 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
+import sys
 import gc
 import time
+import argparse
 from dataclasses import dataclass, asdict
 
 import torch
@@ -17,6 +19,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+
+parser = argparse.ArgumentParser(add_help=False)
+parser.add_argument("--profile", action="store_true",
+                    help="Profile a few warmup steps and print an LLM-readable Markdown "
+                         "table of top CUDA kernels, then exit.")
+_args, _ = parser.parse_known_args()
+PROFILE_MODE = _args.profile
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -448,6 +457,7 @@ ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
 WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
 WARMDOWN_RATIO = 0.75   # fraction of time budget for LR warmdown (Discussion #43: 0.5→0.75)
 FINAL_LR_FRAC = 0.05    # final LR as fraction of initial (Discussion #43: 0.0→0.05)
+GRAD_CLIP_NORM = 1.0    # max gradient norm (0.0 to disable)
 INIT_SCALE = 0.68       # init scale multiplier for attention/MLP weights (Discussion #43)
 X0_INIT = 0.05          # initial x0 skip scalar (Discussion #43: 0.1→0.05)
 LM_HEAD_WD = 0.01       # weight decay for lm_head (Discussion #43)
@@ -573,6 +583,50 @@ triage_done = TRIAGE_TIME <= 0
 print(f"Initial effective rank: {initial_rank:.1f}")
 
 # ---------------------------------------------------------------------------
+# Profiler helper (runs only when --profile is passed)
+# ---------------------------------------------------------------------------
+
+def run_profiler(model, optimizer, train_loader_iter, grad_accum_steps, autocast_ctx, top_n=15):
+    """Profile a few training steps and print a Markdown summary for the LLM to read."""
+    WARMUP, ACTIVE = 2, 5
+    schedule = torch.profiler.schedule(wait=0, warmup=WARMUP, active=ACTIVE, repeat=1)
+    activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    print(f"\n## Profiler: running warmup steps (not counted in TIME_BUDGET)")
+    with torch.profiler.profile(activities=activities, schedule=schedule,
+                                record_shapes=False, with_stack=False) as prof:
+        for _step in range(WARMUP + ACTIVE):
+            x_p, y_p, _ = next(train_loader_iter)
+            for _ in range(grad_accum_steps):
+                with autocast_ctx:
+                    loss = model(x_p, y_p)
+                (loss / grad_accum_steps).backward()
+                x_p, y_p, _ = next(train_loader_iter)
+            optimizer.step()
+            model.zero_grad(set_to_none=True)
+            prof.step()
+
+    key_avgs = prof.key_averages()
+    cuda_ops = [(e.key, e.self_cuda_time_total, e.count)
+                for e in key_avgs if e.self_cuda_time_total > 0]
+    cuda_ops.sort(key=lambda x: -x[1])
+    total_cuda_us = sum(t for _, t, _ in cuda_ops) or 1
+
+    print(f"\n## Top {top_n} CUDA kernels ({ACTIVE} profiled steps)\n")
+    print("| Rank | Kernel | Self CUDA (ms) | % of Total | Calls |")
+    print("|------|--------|---------------|------------|-------|")
+    for rank, (name, us, calls) in enumerate(cuda_ops[:top_n], 1):
+        ms = us / 1000
+        pct = 100 * us / total_cuda_us
+        short = (name[:52] + "..") if len(name) > 54 else name
+        print(f"| {rank} | `{short}` | {ms:.2f} | {pct:.1f}% | {calls} |")
+    print(f"\n_Total CUDA time: {total_cuda_us/1e6:.3f}s over {ACTIVE} steps_")
+
+# If --profile flag is set, run profiler and exit without full training
+if PROFILE_MODE:
+    run_profiler(model, optimizer, train_loader, grad_accum_steps, autocast_ctx)
+    sys.exit(0)
+
+# ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
@@ -612,6 +666,8 @@ while True:
         if group['kind'] == 'muon':
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
+    if GRAD_CLIP_NORM > 0.0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
     optimizer.step()
     model.zero_grad(set_to_none=True)
 
