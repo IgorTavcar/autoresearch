@@ -16,7 +16,8 @@ To set up a new experiment, work with the user to:
    - `guidance.md` — human steering notes (if it exists). Follow any directions here.
 4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good.
+6. **Initialize musings.md**: Create an empty `musings.md`. You will write to it before and after each experiment to record your reasoning and reflections.
+7. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
 
@@ -154,6 +155,27 @@ When you detect stagnation, **switch modes**:
 
 This prevents the depth-first search trap: you explore one direction deeply, but when it plateaus, you step back and try a fundamentally different path with the knowledge you've accumulated.
 
+## Context management
+
+**Critical**: You will run dozens of experiments. Each one generates verbose output (logs, tracebacks, grep results) that will consume your context window. To stay effective over long runs:
+
+**Delegate each experiment to a subagent.** Your main loop should:
+1. Decide what to try next (based on the current phase and results.tsv)
+2. Make the code change to `train.py` yourself
+3. Spawn a subagent to handle the mechanical steps: git commit, run training, extract results, report back
+4. Receive the subagent's summary (val_bpb, peak_vram_mb, success/crash)
+5. Log to results.tsv and decide keep/discard yourself
+
+This way your context stays clean: you hold the research protocol, the phase state, and a compact results history. The subagent's verbose output (full logs, tracebacks, compilation warnings) dies with it.
+
+**Subagent prompt template** (adapt as needed):
+> Run the current experiment. Steps:
+> 1. `git add train.py && git commit -m "<description>"`
+> 2. `uv run train.py > run.log 2>&1` (timeout: 10 minutes)
+> 3. `grep "^val_bpb:\|^peak_vram_mb:" run.log`
+> 4. If grep is empty, run `tail -n 50 run.log` and report the error.
+> 5. Report back: all extracted metrics, or the crash traceback.
+
 ## The experiment loop
 
 The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
@@ -165,15 +187,17 @@ LOOP FOREVER:
    - Read `findings.md` if it exists — review what's known.
    - Check for stagnation (see above).
    - Decide: parameter tuning or structural exploration? Write a one-line rationale.
-2. Tune `train.py` with the chosen experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit.
-9. If val_bpb is equal or worse, you git reset back to where you started.
-10. Every 5 experiments: update `findings.md` and commit it.
+2. **Pre-experiment rationale**: Write a new section in `musings.md` explaining the idea you want to try, the rationale behind it, and any relevant ML theory or evidence for why it might work.
+3. Tune `train.py` with the chosen experimental idea by directly hacking the code.
+4. git commit
+5. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+6. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
+7. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
+8. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
+9. **Post-experiment reflection**: Update `musings.md` with whether the experiment succeeded or failed, and what you make of the result.
+10. If val_bpb improved (lower), you "advance" the branch, keeping the git commit.
+11. If val_bpb is equal or worse, you git reset back to where you started.
+12. Every 5 experiments: update `findings.md` and commit it.
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate.
 

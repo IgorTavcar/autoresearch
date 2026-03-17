@@ -147,6 +147,17 @@ def download_single_shard(index):
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
+            # Verify Content-Length matches actual download size (PR #291)
+            expected_size = int(response.headers.get("Content-Length", 0))
+            if expected_size > 0:
+                actual_size = os.path.getsize(temp_path)
+                if actual_size != expected_size:
+                    raise IOError(f"Size mismatch for {filename}: expected {expected_size}, got {actual_size}")
+            # Validate Parquet structure before committing (PR #291)
+            try:
+                pq.read_metadata(temp_path)
+            except Exception as e:
+                raise IOError(f"Parquet validation failed for {filename}: {e}")
             os.replace(temp_path, filepath)
             _write_sha256(filepath)
             print(f"  Downloaded {filename}")
@@ -511,20 +522,24 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000, backend=None):
 # Evaluation (DO NOT CHANGE — this is the fixed metric)
 # ---------------------------------------------------------------------------
 
-def evaluate_bpb(model, tokenizer, batch_size, backend=None):
+def evaluate_bpb(model, tokenizer, batch_size, backend=None, seq_len=None, max_steps=None):
     """
     Bits per byte (BPB): vocab size-independent evaluation metric.
     Sums per-token cross-entropy (in nats), sums target byte lengths,
     then converts nats/byte to bits/byte. Special tokens (byte length 0)
     are excluded from both sums.
     Uses fixed MAX_SEQ_LEN so results are comparable across configs.
+    seq_len: override sequence length (for low-VRAM GPUs). Defaults to MAX_SEQ_LEN.
+    max_steps: cap eval steps (for low-VRAM GPUs). Defaults to EVAL_TOKENS-based calculation.
     """
     if backend is None:
         backend = "mlx" if _USE_MLX else "mps"
+    if seq_len is None:
+        seq_len = MAX_SEQ_LEN
 
     token_bytes = get_token_bytes(backend=backend)
-    val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val", backend=backend)
-    steps = EVAL_TOKENS // (batch_size * MAX_SEQ_LEN)
+    val_loader = make_dataloader(tokenizer, batch_size, seq_len, "val", backend=backend)
+    steps = max_steps if max_steps is not None else EVAL_TOKENS // (batch_size * seq_len)
     total_nats = 0.0
     total_bytes = 0
 

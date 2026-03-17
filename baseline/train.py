@@ -485,6 +485,18 @@ device = torch.device("cuda")
 autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
 DEVICE_BF16_PEAK_FLOPS = 15e12  # Jetson AGX Orin 32GB (measured ~5-24 TFLOPS depending on matrix size)
 
+# Low-VRAM auto-detection (PR #299): scale down for GPUs with < 6GB
+VRAM_GB = torch.cuda.get_device_properties(0).total_memory / 1e9
+if VRAM_GB < 6:
+    DEVICE_BATCH_SIZE = 32
+    TOTAL_BATCH_SIZE = 2**14  # 16K tokens per step
+    WINDOW_PATTERN = "SSSL"
+    TRAIN_SEQ_LEN = min(MAX_SEQ_LEN, 256)
+    DEPTH = 4
+    print(f"Low-VRAM mode: {VRAM_GB:.1f}GB GPU detected, reducing to batch={DEVICE_BATCH_SIZE}, seq={TRAIN_SEQ_LEN}, depth={DEPTH}")
+else:
+    TRAIN_SEQ_LEN = MAX_SEQ_LEN
+
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
 print(f"Vocab size: {vocab_size:,}")
@@ -494,7 +506,7 @@ def build_model_config(depth):
     model_dim = ((base_dim + HEAD_DIM - 1) // HEAD_DIM) * HEAD_DIM
     num_heads = model_dim // HEAD_DIM
     return GPTConfig(
-        sequence_len=MAX_SEQ_LEN, vocab_size=vocab_size,
+        sequence_len=TRAIN_SEQ_LEN, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
         window_pattern=WINDOW_PATTERN,
     )
@@ -515,7 +527,7 @@ num_params = param_counts['total']
 num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
-tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
+tokens_per_fwdbwd = DEVICE_BATCH_SIZE * TRAIN_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0, \
     f"DEVICE_BATCH_SIZE={DEVICE_BATCH_SIZE} does not evenly divide TOTAL_BATCH_SIZE={TOTAL_BATCH_SIZE} (tokens_per_fwdbwd={tokens_per_fwdbwd})"
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
@@ -533,7 +545,7 @@ optimizer = model.setup_optimizer(
     value_embedding_wd=VALUE_EMBEDDING_WD,
 )
 
-train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
+train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, TRAIN_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
 
 print(f"Time budget: {TIME_BUDGET}s")
@@ -720,7 +732,9 @@ torch.save(model.state_dict(), "checkpoint.pt")
 # Final eval
 model.eval()
 with autocast_ctx:
-    val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
+    val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE,
+                           seq_len=TRAIN_SEQ_LEN,
+                           max_steps=50 if VRAM_GB < 6 else None)
 
 # Final summary
 t_end = time.time()
