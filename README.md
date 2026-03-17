@@ -233,6 +233,7 @@ uv run train_mlx.py                          # Run MLX directly
 - [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) — Canonical macOS MPS port (1,099 stars)
 - [mutable-state-inc/autoresearch-at-home](https://github.com/mutable-state-inc/autoresearch-at-home) — Collaborative distributed platform (321 stars)
 - [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) — Windows + RTX auto-profiling (195 stars)
+- [andyluo7/autoresearch](https://github.com/andyluo7/autoresearch) — AMD ROCm port
 - [Aum08Desai/test-time-rl-discover](https://github.com/Aum08Desai/test-time-rl-discover-autoresearch) — RL-based config discovery
 - [matt-langston/autoresearch](https://github.com/matt-langston/autoresearch) — DGX Spark (Blackwell), zero-diff wrapper
 
