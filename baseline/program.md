@@ -40,7 +40,14 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
 
+**Novelty criterion**: All else being equal, avoid repeating the same type of edit in slightly different forms. If recent experiments explore the same dimension, switch to a different type of change.
+
 **The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
+
+Before proposing a new experiment, briefly inspect recent entries in `results.tsv` (if available) and consider:
+- which types of changes have already been tried
+- which areas are underexplored
+- whether progress has stalled
 
 ## Output format
 
@@ -185,8 +192,9 @@ LOOP FOREVER:
 1. **Plan** (guidance step):
    - Read `guidance.md` if it exists — follow any human directions.
    - Read `findings.md` if it exists — review what's known.
+   - Read recent results in `results.tsv` (if available).
    - Check for stagnation (see above).
-   - Decide: parameter tuning or structural exploration? Write a one-line rationale.
+   - Decide: **exploit** (a small, local improvement) or **explore** (a different experiment dimension)? Write a one-line rationale.
 2. **Pre-experiment rationale**: Write a new section in `musings.md` explaining the idea you want to try, the rationale behind it, and any relevant ML theory or evidence for why it might work.
 3. Tune `train.py` with the chosen experimental idea by directly hacking the code.
 4. git commit

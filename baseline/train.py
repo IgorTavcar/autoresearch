@@ -101,7 +101,14 @@ class CausalSelfAttention(nn.Module):
             repeat = self.n_head // self.n_kv_head
             k = k.repeat_interleave(repeat, dim=1)
             v = v.repeat_interleave(repeat, dim=1)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        # Apply sliding window mask if needed
+        window = window_size[0] if isinstance(window_size, tuple) else window_size
+        if window > 0 and window < T:
+            mask = torch.ones(T, T, dtype=torch.bool, device=q.device).tril()
+            mask = mask.triu(diagonal=1 - window)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, is_causal=False)
+        else:
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
